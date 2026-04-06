@@ -4138,6 +4138,16 @@ TEST(test_settled_rewards_are_visible_in_wallet_script_index) {
   std::uint64_t balance = 0;
   for (const auto& entry : entries) balance += entry.value;
   ASSERT_TRUE(balance > 0);
+
+  const auto utxos = db.load_utxos();
+  std::uint64_t direct_balance = 0;
+  for (const auto& [_, entry] : utxos) {
+    std::array<std::uint8_t, 20> got{};
+    if (!is_p2pkh_script_pubkey(entry.out.script_pubkey, &got)) continue;
+    if (got != own_pkh) continue;
+    direct_balance += entry.out.value;
+  }
+  ASSERT_TRUE(direct_balance > 0);
 }
 
 TEST(test_finalized_frontier_txs_are_indexed_for_explorer_queries) {

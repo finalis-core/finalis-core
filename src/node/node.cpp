@@ -1177,6 +1177,19 @@ constexpr const char* kConsensusSafetyStatePrefix = "CSAFE:";
 bool replay_mode_is_frontier(const Bytes& bytes) { return std::string(bytes.begin(), bytes.end()) == "frontier"; }
 
 bool persist_canonical_cache_rows(storage::DB& db, const consensus::CanonicalDerivedState& state) {
+  const std::string utxo_prefix = storage::key_utxo_prefix();
+  std::set<std::string> desired_utxos;
+  desired_utxos.clear();
+  for (const auto& [op, _] : state.utxos) desired_utxos.insert(storage::key_utxo(op));
+  for (const auto& [key, _] : db.scan_prefix(utxo_prefix)) {
+    if (desired_utxos.find(key) == desired_utxos.end()) {
+      if (!db.erase(key)) return false;
+    }
+  }
+  for (const auto& [op, entry] : state.utxos) {
+    if (!db.put_utxo(op, entry.out)) return false;
+  }
+
   const std::string script_utxo_prefix = storage::key_script_utxo_prefix(Hash32{}).substr(0, 3);
   std::set<std::string> desired_script_utxos;
   desired_script_utxos.clear();
