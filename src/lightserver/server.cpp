@@ -985,6 +985,9 @@ std::string Server::handle_rpc_body(const std::string& body) {
     oss << ",\"established_peer_count\":";
     if (runtime.has_value()) oss << runtime->established_peer_count;
     else oss << "null";
+    oss << ",\"protocol_reserve_balance\":";
+    if (auto reserve = view->get_protocol_reserve_balance(); reserve.has_value()) oss << *reserve;
+    else oss << "null";
     oss << ",\"mempool_size\":";
     if (runtime.has_value()) oss << runtime->mempool_tx_count;
     else oss << "null";

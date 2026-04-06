@@ -56,17 +56,21 @@ Tx make_test_tx(const std::string& addr) {
   return tx;
 }
 
-Block make_test_transition(const Tx& tx, std::uint64_t height, std::uint64_t timestamp) {
-  Block block;
-  block.header.prev_finalized_hash = zero_hash();
-  block.header.height = height;
-  block.header.timestamp = timestamp;
-  block.header.merkle_root = tx.txid();
-  block.header.leader_pubkey.fill(0x11);
-  block.header.leader_signature.fill(0x22);
-  block.header.round = 0;
-  block.txs.push_back(tx);
-  return block;
+FrontierTransition make_test_transition(std::uint64_t height) {
+  FrontierTransition transition;
+  transition.prev_finalized_hash = zero_hash();
+  transition.height = height;
+  transition.round = 0;
+  transition.leader_pubkey.fill(0x11);
+  transition.prev_frontier = 0;
+  transition.next_frontier = 1;
+  transition.prev_state_root.fill(0x22);
+  transition.next_state_root.fill(0x33);
+  transition.ordered_slice_commitment.fill(0x44);
+  transition.decisions_commitment.fill(0x55);
+  transition.quorum_threshold = 1;
+  transition.observed_signers.push_back(transition.leader_pubkey);
+  return transition;
 }
 
 class ScopedRpcHook {
@@ -108,9 +112,9 @@ struct ExplorerFixture {
   Hash32 known_scripthash = scripthash_for_address(known_address);
   Hash32 empty_scripthash = scripthash_for_address(empty_address);
   Tx tx = make_test_tx(known_address);
-  Block transition = make_test_transition(tx, 7, 1700000000ULL);
+  FrontierTransition transition = make_test_transition(7);
   std::string txid = hex_encode32(tx.txid());
-  std::string transition_hash = hex_encode32(transition.header.block_id());
+  std::string transition_hash = hex_encode32(transition.transition_id());
   std::string known_scripthash_hex = hex_encode32(known_scripthash);
   std::string empty_scripthash_hex = hex_encode32(empty_scripthash);
   std::string unknown_txid = std::string(63, '0') + "1";
@@ -126,7 +130,8 @@ Config test_config() {
 std::string default_rpc_handler(const ExplorerFixture& fx, const std::string& body) {
   if (body.find("\"method\":\"get_status\"") != std::string::npos) {
     return rpc_result(std::string("{\"network_name\":\"mainnet\",\"finalized_height\":10,\"finalized_transition_hash\":\"") +
-                      fx.transition_hash + "\",\"version\":\"fake-lightserver\",\"availability\":{\"epoch\":9,"
+                      fx.transition_hash + "\",\"version\":\"fake-lightserver\",\"protocol_reserve_balance\":4200000000,"
+                      "\"availability\":{\"epoch\":9,"
                       "\"retained_prefix_count\":5,\"tracked_operator_count\":28,\"eligible_operator_count\":26,"
                       "\"below_min_eligible\":true,\"checkpoint_derivation_mode\":\"fallback\","
                       "\"checkpoint_fallback_reason\":\"hysteresis_recovery_pending\",\"fallback_sticky\":true,"
@@ -188,6 +193,13 @@ std::string default_rpc_handler(const ExplorerFixture& fx, const std::string& bo
     }
     return rpc_error(-32001, "transition not found");
   }
+  if (body.find("\"method\":\"get_ingress_record\"") != std::string::npos) {
+    if (body.find("\"seq\":1") != std::string::npos) {
+      return rpc_result(std::string("{\"seq\":1,\"present\":true,\"txid\":\"") + fx.txid +
+                        "\",\"tx_hash\":\"" + fx.txid + "\",\"bytes_present\":true}");
+    }
+    return rpc_result("{\"seq\":999,\"present\":false}");
+  }
   if (body.find("\"method\":\"get_utxos\"") != std::string::npos) {
     if (body.find(fx.known_scripthash_hex) != std::string::npos) {
       return rpc_result(std::string("[{\"txid\":\"") + fx.txid + "\",\"vout\":0,\"value\":123456789,\"height\":7}]");
@@ -207,7 +219,8 @@ std::string default_rpc_handler(const ExplorerFixture& fx, const std::string& bo
 std::string future_policy_rpc_handler(const ExplorerFixture& fx, const std::string& body) {
   if (body.find("\"method\":\"get_status\"") != std::string::npos) {
     return rpc_result(std::string("{\"network_name\":\"mainnet\",\"finalized_height\":240001,\"finalized_transition_hash\":\"") +
-                      fx.transition_hash + "\",\"version\":\"fake-lightserver\",\"availability\":{\"epoch\":7500,"
+                      fx.transition_hash + "\",\"version\":\"fake-lightserver\",\"protocol_reserve_balance\":8400000000,"
+                      "\"availability\":{\"epoch\":7500,"
                       "\"retained_prefix_count\":7,\"tracked_operator_count\":31,\"eligible_operator_count\":30,"
                       "\"below_min_eligible\":false,\"checkpoint_derivation_mode\":\"normal\","
                       "\"checkpoint_fallback_reason\":\"none\",\"fallback_sticky\":false,"
@@ -248,7 +261,8 @@ std::string future_policy_rpc_handler(const ExplorerFixture& fx, const std::stri
 std::string no_recent_tx_rpc_handler(const ExplorerFixture& fx, const std::string& body) {
   if (body.find("\"method\":\"get_status\"") != std::string::npos) {
     return rpc_result(std::string("{\"network_name\":\"mainnet\",\"finalized_height\":10,\"finalized_transition_hash\":\"") +
-                      fx.transition_hash + "\",\"version\":\"fake-lightserver\",\"ticket_pow\":{\"difficulty\":10,"
+                      fx.transition_hash + "\",\"version\":\"fake-lightserver\",\"protocol_reserve_balance\":4200000000,"
+                      "\"ticket_pow\":{\"difficulty\":10,"
                       "\"difficulty_min\":8,\"difficulty_max\":12,\"epoch_health\":\"healthy\","
                       "\"streak_up\":1,\"streak_down\":0,\"nonce_search_limit\":4096,\"bonus_cap_bps\":1000}}");
   }
@@ -280,6 +294,7 @@ TEST(test_explorer_api_status_and_tx_contract) {
   ASSERT_TRUE(status.body.find("\"committee_snapshot\"") != std::string::npos);
   ASSERT_TRUE(status.body.find("\"finalized_height\":10") != std::string::npos);
   ASSERT_TRUE(status.body.find("\"finalized_transition_hash\":\"" + fx.transition_hash + "\"") != std::string::npos);
+  ASSERT_TRUE(status.body.find("\"protocol_reserve_balance\":4200000000") != std::string::npos);
 
   const auto tx_ok = handle_request(cfg, make_http_get("/api/tx/" + fx.txid));
   ASSERT_EQ(tx_ok.status, 200);
@@ -457,6 +472,9 @@ TEST(test_explorer_root_page_surfaces_summary_sections_consistently) {
   ASSERT_TRUE(home.body.find("Network ID") != std::string::npos);
   ASSERT_TRUE(home.body.find("Genesis Hash") != std::string::npos);
   ASSERT_TRUE(home.body.find("Wallet API") != std::string::npos);
+  ASSERT_TRUE(home.body.find("Protocol Reserve") != std::string::npos);
+  ASSERT_TRUE(home.body.find("42.00000000 FLS") != std::string::npos);
+  ASSERT_TRUE(home.body.find("used by core rules after year 12") != std::string::npos);
   ASSERT_TRUE(home.body.find("Copy Status API Path") != std::string::npos);
 }
 

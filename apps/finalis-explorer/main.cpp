@@ -57,6 +57,7 @@ struct StatusResult {
   std::string finalized_transition_hash;
   std::string backend_version;
   std::string wallet_api_version;
+  std::optional<std::uint64_t> protocol_reserve_balance;
   std::uint64_t healthy_peer_count{0};
   std::uint64_t established_peer_count{0};
   std::size_t latest_finality_committee_size{0};
@@ -173,7 +174,7 @@ struct TransitionResult {
   std::uint64_t height{0};
   std::string hash;
   std::string prev_finalized_hash;
-  std::uint64_t timestamp{0};
+  std::optional<std::uint64_t> timestamp;
   std::uint32_t round{0};
   std::size_t tx_count{0};
   std::vector<std::string> txids;
@@ -761,7 +762,20 @@ std::string render_root(const Config& cfg) {
        << "style=\"width:min(100%,720px);padding:10px 12px;font:inherit;border:1px solid #cfcfc6;border-radius:8px;\"> "
        << "<button type=\"submit\" class=\"copy-button\">Search</button></form></div>";
   auto status = fetch_status_result(cfg);
-  body << "<div class=\"card\"><h2>Backend</h2><div class=\"grid\">";
+  body << "<div class=\"card\"><div class=\"status-hero\"><div><h2>Backend</h2></div>";
+  if (status.value.has_value()) {
+    body << "<div style=\"max-width:340px;flex:0 1 340px;\">"
+         << "<div class=\"note\" style=\"margin:0;\">"
+         << "<strong>Protocol Reserve</strong><br>"
+         << "<span style=\"display:block;font-size:18px;font-weight:800;margin:6px 0 8px 0;\">"
+         << html_escape(status.value->protocol_reserve_balance.has_value()
+                            ? format_amount(*status.value->protocol_reserve_balance)
+                            : std::string("n/a"))
+         << "</span>"
+         << "<span class=\"muted\">Reserve accumulated by protocol issuance. It is retained for long-horizon monetary support and is intended to be used by core rules after year 12.</span>"
+         << "</div></div>";
+  }
+  body << "</div><div class=\"grid\">";
   body << "<div>Lightserver RPC</div><div class=\"value-cell\">" << mono_value(cfg.rpc_url) << "</div>";
   if (status.value.has_value()) {
     body << "<div>Network</div><div>" << html_escape(status.value->network) << "</div>"
@@ -1069,8 +1083,8 @@ std::string render_committee(const Config& cfg) {
   return page_layout("Committee", body.str());
 }
 
-std::optional<finalis::Block> fetch_transition_by_height(const Config& cfg, std::uint64_t height,
-                                                         std::string* transition_hash_hex, std::string* err) {
+std::optional<finalis::FrontierTransition> fetch_transition_by_height(const Config& cfg, std::uint64_t height,
+                                                                      std::string* transition_hash_hex, std::string* err) {
   auto res = rpc_call(cfg.rpc_url, "get_transition_by_height", std::string("{\"height\":") + std::to_string(height) + "}");
   if (!res.result.has_value() || !res.result->is_object()) {
     if (err) {
@@ -1090,7 +1104,7 @@ std::optional<finalis::Block> fetch_transition_by_height(const Config& cfg, std:
     if (err) *err = "bad transition hex";
     return std::nullopt;
   }
-  auto transition = finalis::Block::parse(*bytes);
+  auto transition = finalis::FrontierTransition::parse(*bytes);
   if (!transition.has_value()) {
     if (err) *err = "transition parse failed";
     return std::nullopt;
@@ -1099,7 +1113,7 @@ std::optional<finalis::Block> fetch_transition_by_height(const Config& cfg, std:
   return transition;
 }
 
-std::optional<finalis::Block> fetch_transition_by_hash(const Config& cfg, const std::string& hash_hex, std::string* err) {
+std::optional<finalis::FrontierTransition> fetch_transition_by_hash(const Config& cfg, const std::string& hash_hex, std::string* err) {
   auto res = rpc_call(cfg.rpc_url, "get_transition", std::string("{\"hash\":\"") + json_escape(hash_hex) + "\"}");
   if (!res.result.has_value() || !res.result->is_object()) {
     if (err) {
@@ -1118,12 +1132,28 @@ std::optional<finalis::Block> fetch_transition_by_hash(const Config& cfg, const 
     if (err) *err = "bad transition hex";
     return std::nullopt;
   }
-  auto transition = finalis::Block::parse(*bytes);
+  auto transition = finalis::FrontierTransition::parse(*bytes);
   if (!transition.has_value()) {
     if (err) *err = "transition parse failed";
     return std::nullopt;
   }
   return transition;
+}
+
+std::vector<std::string> fetch_transition_txids(const Config& cfg, const finalis::FrontierTransition& transition) {
+  std::vector<std::string> txids;
+  if (transition.next_frontier < transition.prev_frontier) return txids;
+  txids.reserve(static_cast<std::size_t>(transition.next_frontier - transition.prev_frontier));
+  for (std::uint64_t seq = transition.prev_frontier + 1; seq <= transition.next_frontier; ++seq) {
+    auto rpc = rpc_call(cfg.rpc_url, "get_ingress_record", std::string("{\"seq\":") + std::to_string(seq) + "}");
+    if (!rpc.result.has_value() || !rpc.result->is_object()) continue;
+    const auto present = object_bool(&*rpc.result, "present").value_or(false);
+    if (!present) continue;
+    auto txid = object_string(&*rpc.result, "txid");
+    if (!txid.has_value() || !is_hex64(*txid)) continue;
+    txids.push_back(*txid);
+  }
+  return txids;
 }
 
 LookupResult<StatusResult> fetch_status_result(const Config& cfg) {
@@ -1142,6 +1172,7 @@ LookupResult<StatusResult> fetch_status_result(const Config& cfg) {
                                          .value_or(object_string(&*status.result, "transition_hash").value_or(""));
   result.backend_version = object_string(&*status.result, "version").value_or("unknown");
   result.wallet_api_version = object_string(&*status.result, "wallet_api_version").value_or("");
+  result.protocol_reserve_balance = object_u64(&*status.result, "protocol_reserve_balance");
   result.healthy_peer_count = object_u64(&*status.result, "healthy_peer_count").value_or(0);
   result.established_peer_count = object_u64(&*status.result, "established_peer_count").value_or(0);
   result.latest_finality_committee_size =
@@ -1272,14 +1303,14 @@ LookupResult<TransitionResult> fetch_transition_result(const Config& cfg, const 
       }
       TransitionResult result;
       result.found = true;
-      result.height = blk->header.height;
+      result.height = blk->height;
       result.hash = transition_hash_hex;
-      result.prev_finalized_hash = finalis::hex_encode32(blk->header.prev_finalized_hash);
-      result.timestamp = blk->header.timestamp;
-      result.round = blk->header.round;
-      result.tx_count = blk->txs.size();
-      result.txids.reserve(blk->txs.size());
-      for (const auto& tx : blk->txs) result.txids.push_back(finalis::hex_encode32(tx.txid()));
+      result.prev_finalized_hash = finalis::hex_encode32(blk->prev_finalized_hash);
+      result.round = blk->round;
+      result.tx_count = blk->next_frontier >= blk->prev_frontier
+                            ? static_cast<std::size_t>(blk->next_frontier - blk->prev_frontier)
+                            : 0;
+      result.txids = fetch_transition_txids(cfg, *blk);
       out.value = std::move(result);
       return out;
     } catch (...) {
@@ -1300,14 +1331,14 @@ LookupResult<TransitionResult> fetch_transition_result(const Config& cfg, const 
     }
     TransitionResult result;
     result.found = true;
-    result.height = blk->header.height;
-    result.hash = finalis::hex_encode32(blk->header.block_id());
-    result.prev_finalized_hash = finalis::hex_encode32(blk->header.prev_finalized_hash);
-    result.timestamp = blk->header.timestamp;
-    result.round = blk->header.round;
-    result.tx_count = blk->txs.size();
-    result.txids.reserve(blk->txs.size());
-    for (const auto& tx : blk->txs) result.txids.push_back(finalis::hex_encode32(tx.txid()));
+    result.height = blk->height;
+    result.hash = finalis::hex_encode32(blk->transition_id());
+    result.prev_finalized_hash = finalis::hex_encode32(blk->prev_finalized_hash);
+    result.round = blk->round;
+    result.tx_count = blk->next_frontier >= blk->prev_frontier
+                          ? static_cast<std::size_t>(blk->next_frontier - blk->prev_frontier)
+                          : 0;
+    result.txids = fetch_transition_txids(cfg, *blk);
     out.value = std::move(result);
     return out;
   } else {
@@ -1366,13 +1397,6 @@ LookupResult<TxResult> fetch_tx_result(const Config& cfg, const std::string& txi
   std::string network_name = "mainnet";
   if (auto st = fetch_status_result(cfg); st.value.has_value()) network_name = st.value->network;
   const std::string hrp = hrp_for_network_name(network_name);
-
-  if (result.finalized_height.has_value()) {
-    std::string transition_hash;
-    std::string block_err;
-    auto blk = fetch_transition_by_height(cfg, *result.finalized_height, &transition_hash, &block_err);
-    if (blk.has_value()) result.timestamp = blk->header.timestamp;
-  }
 
   std::uint64_t total_in = 0;
   bool fee_known = true;
@@ -1563,21 +1587,20 @@ std::vector<RecentTxResult> fetch_recent_tx_results(const Config& cfg, std::size
   for (std::uint64_t h = tip + 1; h-- > start_height && out.size() < max_items;) {
     std::string err;
     std::string transition_hash_hex;
-    auto blk = fetch_transition_by_height(cfg, h, &transition_hash_hex, &err);
-    if (!blk.has_value()) continue;
-    for (const auto& tx : blk->txs) {
+    auto transition = fetch_transition_by_height(cfg, h, &transition_hash_hex, &err);
+    if (!transition.has_value()) continue;
+    const auto txids = fetch_transition_txids(cfg, *transition);
+    for (const auto& txid : txids) {
       if (out.size() >= max_items) break;
       RecentTxResult item;
-      item.txid = finalis::hex_encode32(tx.txid());
+      item.txid = txid;
       item.height = h;
-      item.timestamp = blk->header.timestamp;
-      std::uint64_t total_out = 0;
-      for (const auto& tx_out : tx.outputs) total_out += tx_out.value;
-      item.total_out = total_out;
-      auto tx_lookup = fetch_tx_result(cfg, item.txid);
+      auto tx_lookup = fetch_tx_result(cfg, txid);
       if (tx_lookup.value.has_value()) {
         item.status_label = tx_lookup.value->status_label;
         item.credit_safe = tx_lookup.value->credit_safe;
+        item.timestamp = tx_lookup.value->timestamp;
+        item.total_out = tx_lookup.value->total_out;
       }
       out.push_back(std::move(item));
     }
@@ -1595,6 +1618,7 @@ std::string render_status_json(const StatusResult& result) {
       << "\"finalized_transition_hash\":\"" << json_escape(result.finalized_transition_hash) << "\","
       << "\"backend_version\":\"" << json_escape(result.backend_version) << "\","
       << "\"wallet_api_version\":\"" << json_escape(result.wallet_api_version) << "\","
+      << "\"protocol_reserve_balance\":" << json_u64_or_null(result.protocol_reserve_balance) << ","
       << "\"healthy_peer_count\":" << result.healthy_peer_count << ","
       << "\"established_peer_count\":" << result.established_peer_count << ","
       << "\"latest_finality_committee_size\":" << result.latest_finality_committee_size << ","
@@ -1714,7 +1738,7 @@ std::string render_transition_json(const TransitionResult& result) {
   oss << "{\"found\":" << json_bool(result.found) << ",\"finalized\":true,"
       << "\"height\":" << result.height << ",\"hash\":\"" << json_escape(result.hash) << "\","
       << "\"prev_finalized_hash\":\"" << json_escape(result.prev_finalized_hash) << "\","
-      << "\"timestamp\":" << result.timestamp << ",\"round\":" << result.round
+      << "\"timestamp\":" << json_u64_or_null(result.timestamp) << ",\"round\":" << result.round
       << ",\"tx_count\":" << result.tx_count << ",\"txids\":[";
   for (std::size_t i = 0; i < result.txids.size(); ++i) {
     if (i) oss << ",";
@@ -1910,7 +1934,8 @@ std::string render_transition(const Config& cfg, const std::string& ident) {
        << "<div>Transition Hash</div><div class=\"value-cell\">" << mono_value(transition.hash) << "</div>"
        << "<div>Prev Finalized Hash</div><div class=\"value-cell\">" << mono_value(transition.prev_finalized_hash)
        << "</div>"
-       << "<div>Timestamp</div><div>" << html_escape(format_timestamp(transition.timestamp)) << "</div>"
+       << "<div>Timestamp</div><div>"
+       << html_escape(transition.timestamp.has_value() ? format_timestamp(*transition.timestamp) : std::string("n/a")) << "</div>"
        << "<div>Round</div><div>" << transition.round << "</div>"
        << "<div>Tx Count</div><div>" << transition.tx_count << "</div></div>"
        << "<div class=\"summary-actions\">"
