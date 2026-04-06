@@ -344,7 +344,7 @@ class Node {
   void broadcast_finalized_frontier(const FrontierProposal& proposal, const FinalityCertificate& certificate);
   void broadcast_tx(const Tx& tx, int skip_peer_id = 0);
 
-  bool persist_finalized_frontier_record(const consensus::CanonicalFrontierRecord& record);
+  bool persist_finalized_frontier_record(const consensus::CanonicalFrontierRecord& record, const UtxoSet& prev_utxos);
   bool begin_finalized_write(const Block& block);
   bool finish_finalized_write(const Block& block);
   bool check_no_incomplete_finalized_write() const;

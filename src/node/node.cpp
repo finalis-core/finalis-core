@@ -3231,7 +3231,7 @@ bool Node::apply_finalized_frontier_effects_locked(const consensus::CanonicalFro
     return false;
   }
 
-  if (!persist_finalized_frontier_record(record)) return false;
+  if (!persist_finalized_frontier_record(record, utxos_)) return false;
   if (!db_.put_finality_certificate(certificate)) return false;
 
   highest_qc_by_height_[record.transition.height] =
@@ -6199,7 +6199,7 @@ void Node::broadcast_tx(const Tx& tx, int skip_peer_id) {
   }
 }
 
-bool Node::persist_finalized_frontier_record(const consensus::CanonicalFrontierRecord& record) {
+bool Node::persist_finalized_frontier_record(const consensus::CanonicalFrontierRecord& record, const UtxoSet& prev_utxos) {
   if (record.transition.next_frontier !=
       record.transition.prev_frontier + static_cast<std::uint64_t>(record.ordered_records.size())) {
     log_line("finalized-state-invariant-violation source=runtime-write-frontier-continuity height=" +
@@ -6208,9 +6208,27 @@ bool Node::persist_finalized_frontier_record(const consensus::CanonicalFrontierR
   }
 
   std::uint64_t seq = record.transition.prev_frontier;
+  std::uint32_t tx_index = 0;
   for (const auto& ordered_record : record.ordered_records) {
     ++seq;
     if (!db_.put_ingress_record(seq, ordered_record)) return false;
+    auto tx = Tx::parse(ordered_record);
+    if (!tx.has_value()) {
+      log_line("finalized-state-invariant-violation source=runtime-write-frontier-tx-parse height=" +
+               std::to_string(record.transition.height));
+      return false;
+    }
+    if (!db_.put_tx_index(tx->txid(), record.transition.height, tx_index++, ordered_record)) return false;
+    for (const auto& input : tx->inputs) {
+      const auto prev_it = prev_utxos.find(OutPoint{input.prev_txid, input.prev_index});
+      if (prev_it == prev_utxos.end()) continue;
+      const auto spent_scripthash = crypto::sha256(prev_it->second.out.script_pubkey);
+      if (!db_.add_script_history(spent_scripthash, record.transition.height, tx->txid())) return false;
+    }
+    for (const auto& output : tx->outputs) {
+      const auto received_scripthash = crypto::sha256(output.script_pubkey);
+      if (!db_.add_script_history(received_scripthash, record.transition.height, tx->txid())) return false;
+    }
   }
   if (!db_.set_finalized_ingress_tip(record.transition.next_frontier)) return false;
   if (!db_.put_frontier_transition(record.transition.transition_id(), record.transition.serialize())) return false;

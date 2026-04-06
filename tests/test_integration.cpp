@@ -4140,6 +4140,49 @@ TEST(test_settled_rewards_are_visible_in_wallet_script_index) {
   ASSERT_TRUE(balance > 0);
 }
 
+TEST(test_finalized_frontier_txs_are_indexed_for_explorer_queries) {
+  const std::string base = "/tmp/finalis_it_frontier_tx_indexing";
+  Tx tx = make_fixture_ingress_tx(1, 0xA7);
+
+  node::NodeConfig cfg;
+  cfg.disable_p2p = true;
+  cfg.node_id = 0;
+  cfg.max_committee = 1;
+  cfg.network.min_block_interval_ms = 100;
+  cfg.network.round_timeout_ms = 200;
+  cfg.p2p_port = 0;
+  cfg.db_path = base + "/node0";
+  cfg.genesis_path = base + "/genesis.json";
+  cfg.allow_unsafe_genesis_override = true;
+  cfg.validator_key_file = cfg.db_path + "/keystore/validator.json";
+  cfg.validator_passphrase = "test-pass";
+
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base);
+  ASSERT_TRUE(write_mainnet_genesis_file(cfg.genesis_path, 1));
+
+  keystore::ValidatorKey key;
+  std::string kerr;
+  ASSERT_TRUE(keystore::create_validator_keystore(cfg.validator_key_file, cfg.validator_passphrase, "mainnet", "sc",
+                                                  deterministic_seed_for_node_id(0), &key, &kerr));
+
+  std::unique_ptr<node::Node> node;
+  ASSERT_TRUE(restart_single_node_with_seeded_certified_ingress(cfg, {tx.serialize()}, &node));
+  ASSERT_TRUE(wait_for([&]() { return node->status().height >= 1; }, std::chrono::seconds(10)));
+  node->stop();
+
+  storage::DB db;
+  ASSERT_TRUE(db.open(cfg.db_path));
+  const auto loc = db.get_tx_index(tx.txid());
+  ASSERT_TRUE(loc.has_value());
+  ASSERT_EQ(loc->height, 1u);
+  const auto sh = crypto::sha256(tx.outputs[0].script_pubkey);
+  const auto history = db.get_script_history(sh);
+  ASSERT_TRUE(!history.empty());
+  ASSERT_EQ(history[0].txid, tx.txid());
+  ASSERT_EQ(history[0].height, 1u);
+}
+
 TEST(test_restart_repairs_partial_settlement_state) {
   const std::string base = unique_test_base("/tmp/finalis_it_reward_restart_repair");
   {
