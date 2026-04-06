@@ -1177,6 +1177,23 @@ constexpr const char* kConsensusSafetyStatePrefix = "CSAFE:";
 bool replay_mode_is_frontier(const Bytes& bytes) { return std::string(bytes.begin(), bytes.end()) == "frontier"; }
 
 bool persist_canonical_cache_rows(storage::DB& db, const consensus::CanonicalDerivedState& state) {
+  const std::string script_utxo_prefix = storage::key_script_utxo_prefix(Hash32{}).substr(0, 3);
+  std::set<std::string> desired_script_utxos;
+  desired_script_utxos.clear();
+  for (const auto& [op, entry] : state.utxos) {
+    const auto scripthash = crypto::sha256(entry.out.script_pubkey);
+    desired_script_utxos.insert(storage::key_script_utxo(scripthash, op));
+  }
+  for (const auto& [key, _] : db.scan_prefix(script_utxo_prefix)) {
+    if (desired_script_utxos.find(key) == desired_script_utxos.end()) {
+      if (!db.erase(key)) return false;
+    }
+  }
+  for (const auto& [op, entry] : state.utxos) {
+    const auto scripthash = crypto::sha256(entry.out.script_pubkey);
+    if (!db.put_script_utxo(scripthash, op, entry.out, state.finalized_height)) return false;
+  }
+
   for (const auto& [pub, info] : state.validators.all()) {
     if (!db.put_validator(pub, info)) return false;
   }
@@ -3230,6 +3247,10 @@ bool Node::apply_finalized_frontier_effects_locked(const consensus::CanonicalFro
   mempool_.remove_confirmed(confirmed_txids);
   hydrate_runtime_from_canonical_state_locked(next_state);
   mempool_.prune_against_utxo(utxos_);
+  const auto now = now_ms();
+  current_round_ = 0;
+  round_started_ms_ = now;
+  last_finalized_progress_ms_ = now;
 
   if (!persist_canonical_cache_rows(db_, next_state)) return false;
   if (!verify_and_persist_consensus_state_commitment_locked(next_state)) return false;

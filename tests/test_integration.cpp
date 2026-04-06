@@ -4060,6 +4060,86 @@ TEST(test_block_path_applies_settlement_same_as_quorum_path) {
   ASSERT_EQ(state0->reward_score_units, state1->reward_score_units);
 }
 
+TEST(test_single_validator_respects_min_block_interval_after_finalization) {
+  const std::string base = "/tmp/finalis_it_min_block_interval_after_finalize";
+
+  node::NodeConfig cfg;
+  cfg.disable_p2p = true;
+  cfg.node_id = 0;
+  cfg.max_committee = 1;
+  cfg.network.min_block_interval_ms = 1200;
+  cfg.network.round_timeout_ms = 200;
+  cfg.p2p_port = 0;
+  cfg.db_path = base + "/node0";
+  cfg.genesis_path = base + "/genesis.json";
+  cfg.allow_unsafe_genesis_override = true;
+  cfg.validator_key_file = cfg.db_path + "/keystore/validator.json";
+  cfg.validator_passphrase = "test-pass";
+
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base);
+  ASSERT_TRUE(write_mainnet_genesis_file(cfg.genesis_path, 1));
+
+  keystore::ValidatorKey key;
+  std::string kerr;
+  ASSERT_TRUE(keystore::create_validator_keystore(cfg.validator_key_file, cfg.validator_passphrase, "mainnet", "sc",
+                                                  deterministic_seed_for_node_id(0), &key, &kerr));
+
+  std::unique_ptr<node::Node> node;
+  ASSERT_TRUE(restart_single_node_with_seeded_certified_ingress(cfg, {}, &node));
+
+  ASSERT_TRUE(wait_for([&]() { return node->status().height >= 1; }, std::chrono::seconds(10)));
+  const auto first_height = node->status().height;
+  ASSERT_EQ(first_height, 1u);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  ASSERT_EQ(node->status().height, first_height);
+
+  ASSERT_TRUE(wait_for([&]() { return node->status().height >= first_height + 1; }, std::chrono::seconds(5)));
+  node->stop();
+}
+
+TEST(test_settled_rewards_are_visible_in_wallet_script_index) {
+  const std::string base = "/tmp/finalis_it_wallet_script_index_rewards";
+
+  node::NodeConfig cfg;
+  cfg.disable_p2p = true;
+  cfg.node_id = 0;
+  cfg.max_committee = 1;
+  cfg.network.min_block_interval_ms = 100;
+  cfg.network.round_timeout_ms = 200;
+  cfg.p2p_port = 0;
+  cfg.db_path = base + "/node0";
+  cfg.genesis_path = base + "/genesis.json";
+  cfg.allow_unsafe_genesis_override = true;
+  cfg.validator_key_file = cfg.db_path + "/keystore/validator.json";
+  cfg.validator_passphrase = "test-pass";
+
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base);
+  ASSERT_TRUE(write_mainnet_genesis_file(cfg.genesis_path, 1));
+
+  keystore::ValidatorKey key;
+  std::string kerr;
+  ASSERT_TRUE(keystore::create_validator_keystore(cfg.validator_key_file, cfg.validator_passphrase, "mainnet", "sc",
+                                                  deterministic_seed_for_node_id(0), &key, &kerr));
+
+  std::unique_ptr<node::Node> node;
+  ASSERT_TRUE(restart_single_node_with_seeded_certified_ingress(cfg, {}, &node));
+  ASSERT_TRUE(wait_for([&]() { return node->status().height >= 33; }, std::chrono::seconds(60)));
+  node->stop();
+
+  storage::DB db;
+  ASSERT_TRUE(db.open(cfg.db_path));
+  const auto own_pkh = crypto::h160(Bytes(key.pubkey.begin(), key.pubkey.end()));
+  const auto scripthash = crypto::sha256(address::p2pkh_script_pubkey(own_pkh));
+  const auto entries = db.get_script_utxos(scripthash);
+  ASSERT_TRUE(!entries.empty());
+  std::uint64_t balance = 0;
+  for (const auto& entry : entries) balance += entry.value;
+  ASSERT_TRUE(balance > 0);
+}
+
 TEST(test_restart_repairs_partial_settlement_state) {
   const std::string base = unique_test_base("/tmp/finalis_it_reward_restart_repair");
   {
