@@ -4193,6 +4193,71 @@ TEST(test_finalized_frontier_txs_are_indexed_for_explorer_queries) {
   ASSERT_EQ(history[0].height, 1u);
 }
 
+TEST(test_locally_relayed_wallet_tx_enters_certified_ingress_and_finalizes) {
+  const std::string base = "/tmp/finalis_it_local_wallet_tx_finalizes";
+
+  node::NodeConfig cfg;
+  cfg.disable_p2p = true;
+  cfg.node_id = 0;
+  cfg.max_committee = 1;
+  cfg.network.min_block_interval_ms = 100;
+  cfg.network.round_timeout_ms = 200;
+  cfg.p2p_port = 0;
+  cfg.db_path = base + "/node0";
+  cfg.genesis_path = base + "/genesis.json";
+  cfg.allow_unsafe_genesis_override = true;
+  cfg.validator_key_file = cfg.db_path + "/keystore/validator.json";
+  cfg.validator_passphrase = "test-pass";
+
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base);
+  ASSERT_TRUE(write_mainnet_genesis_file(cfg.genesis_path, 1));
+
+  keystore::ValidatorKey key;
+  std::string kerr;
+  ASSERT_TRUE(keystore::create_validator_keystore(cfg.validator_key_file, cfg.validator_passphrase, "mainnet", "sc",
+                                                  deterministic_seed_for_node_id(0), &key, &kerr));
+
+  std::unique_ptr<node::Node> node;
+  ASSERT_TRUE(restart_single_node_with_seeded_certified_ingress(cfg, {}, &node));
+  ASSERT_TRUE(wait_for([&]() { return node->status().height >= 33; }, std::chrono::seconds(60)));
+
+  const auto own_pkh = crypto::h160(Bytes(key.pubkey.begin(), key.pubkey.end()));
+  auto spendable = node->find_utxos_by_pubkey_hash_for_test(own_pkh);
+  ASSERT_TRUE(!spendable.empty());
+  const auto prev = spendable.front();
+
+  std::array<std::uint8_t, 20> recipient_pkh{};
+  recipient_pkh.fill(0x55);
+  constexpr std::uint64_t kAmount = 10'000'000'000ULL;
+  constexpr std::uint64_t kFee = 10'000ULL;
+  ASSERT_TRUE(prev.second.value > kAmount + kFee);
+
+  std::vector<TxOut> outputs;
+  outputs.push_back(TxOut{kAmount, address::p2pkh_script_pubkey(recipient_pkh)});
+  outputs.push_back(TxOut{prev.second.value - kAmount - kFee, address::p2pkh_script_pubkey(own_pkh)});
+
+  std::string build_err;
+  auto tx = build_signed_p2pkh_tx_single_input(prev.first, prev.second, Bytes(key.privkey.begin(), key.privkey.end()), outputs,
+                                               &build_err);
+  ASSERT_TRUE(tx.has_value());
+  ASSERT_TRUE(node->inject_tx_for_test(*tx, true));
+
+  ASSERT_TRUE(wait_for([&]() { return node->status().height >= 34; }, std::chrono::seconds(10)));
+
+  const auto recipient_utxos = node->find_utxos_by_pubkey_hash_for_test(recipient_pkh);
+  ASSERT_TRUE(!recipient_utxos.empty());
+  ASSERT_EQ(recipient_utxos.front().second.value, kAmount);
+  node->stop();
+  node.reset();
+
+  storage::DB db;
+  ASSERT_TRUE(db.open(cfg.db_path));
+  const auto loc = db.get_tx_index(tx->txid());
+  ASSERT_TRUE(loc.has_value());
+  ASSERT_EQ(loc->height, 34u);
+}
+
 TEST(test_restart_repairs_partial_settlement_state) {
   const std::string base = unique_test_base("/tmp/finalis_it_reward_restart_repair");
   {

@@ -5912,10 +5912,72 @@ bool Node::handle_tx(const Tx& tx, bool from_network, int from_peer_id) {
     }
     if (fee < min_relay_fee) return false;
     txid = tx.txid();
+    std::string ingress_error;
+    if (!maybe_certify_locally_accepted_tx_locked(tx, &ingress_error) && !ingress_error.empty()) {
+      log_line("ingress-local-certify-skip txid=" + hex_encode32(txid) + " reason=" + ingress_error);
+    }
     log_line("mempool-accept txid=" + hex_encode32(txid) + " mempool_size=" + std::to_string(mempool_.size()));
   }
 
   if (from_network && !should_mute_peer(from_peer_id)) broadcast_tx(tx, from_peer_id);
+  return true;
+}
+
+bool Node::maybe_certify_locally_accepted_tx_locked(const Tx& tx, std::string* error) {
+  if (!is_validator_) {
+    if (error) *error = "local-not-validator";
+    return false;
+  }
+
+  const std::uint64_t next_height = finalized_height_ + 1;
+  auto committee = ingress_committee_locked(next_height);
+  if (committee.empty()) {
+    if (error) *error = "empty-ingress-committee";
+    return false;
+  }
+
+  const std::uint32_t lane = consensus::assign_ingress_lane(tx);
+  const PubKey32& designated_certifier = committee[static_cast<std::size_t>(lane) % committee.size()];
+  if (designated_certifier != local_key_.public_key) {
+    if (error) *error = "local-not-designated-ingress-certifier";
+    return false;
+  }
+
+  const auto txid = tx.txid();
+  if (db_.get_ingress_bytes(txid).has_value()) {
+    if (error) error->clear();
+    return true;
+  }
+
+  const auto lane_state = db_.get_lane_state(lane);
+  const Bytes tx_bytes = tx.serialize();
+
+  IngressCertificate cert;
+  cert.epoch = consensus::committee_epoch_start(next_height, cfg_.network.committee_epoch_blocks);
+  cert.lane = lane;
+  cert.seq = lane_state.has_value() ? (lane_state->max_seq + 1) : 1;
+  cert.txid = txid;
+  cert.tx_hash = crypto::sha256d(tx_bytes);
+  cert.prev_lane_root = lane_state.has_value() ? lane_state->lane_root : zero_hash();
+
+  const auto signing_hash = cert.signing_hash();
+  const Bytes msg(signing_hash.begin(), signing_hash.end());
+  auto sig = crypto::ed25519_sign(msg, local_key_.private_key);
+  if (!sig.has_value()) {
+    if (error) *error = "ingress-sign-failed";
+    return false;
+  }
+  cert.sigs.push_back(FinalitySig{local_key_.public_key, *sig});
+
+  std::string append_error;
+  if (!consensus::append_validated_ingress_record(db_, cert, tx_bytes, committee, &append_error)) {
+    if (error) *error = append_error;
+    return false;
+  }
+
+  if (error) error->clear();
+  log_line("ingress-local-certified txid=" + hex_encode32(txid) + " lane=" + std::to_string(lane) +
+           " seq=" + std::to_string(cert.seq) + " epoch=" + std::to_string(cert.epoch));
   return true;
 }
 

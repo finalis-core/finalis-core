@@ -308,6 +308,7 @@ class Node {
   bool handle_frontier_block_locked(const FrontierProposal& proposal, const std::optional<FinalityCertificate>& certificate,
                                     int from_peer_id, bool from_network);
   bool handle_tx(const Tx& tx, bool from_network, int from_peer_id = 0);
+  bool maybe_certify_locally_accepted_tx_locked(const Tx& tx, std::string* error = nullptr);
   bool finalize_if_quorum(const Hash32& transition_id, std::uint64_t height, std::uint32_t round);
   bool verify_quorum_certificate_locked(const QuorumCertificate& qc, std::vector<FinalitySig>* filtered = nullptr,
                                         std::string* error = nullptr) const;
