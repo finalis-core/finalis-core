@@ -101,8 +101,12 @@ CommitteeEligibilityDecision committee_eligibility_at_checkpoint(
   decision.min_bond_eligible = info.joined_height == 0 || info.bonded_amount >= effective_min_bond;
   if (!decision.min_bond_eligible) return decision;
   decision.availability_tracked = availability_state != nullptr;
-  decision.availability_eligible =
-      availability_state != nullptr && availability::operator_is_eligible(*availability_state, availability_cfg);
+  const bool bootstrap_genesis_operator =
+      info.joined_height == 0 && info.bond_outpoint.txid == zero_hash() && info.bond_outpoint.index == 0 &&
+      canonical_operator_id(validator_pubkey, info) == validator_pubkey;
+  decision.availability_eligible = bootstrap_genesis_operator ||
+                                   (availability_state != nullptr &&
+                                    availability::operator_is_eligible(*availability_state, availability_cfg));
   decision.eligible = decision.validator_lifecycle_eligible && decision.min_bond_eligible &&
                       (!enforce_availability_gate || decision.availability_eligible);
   return decision;
