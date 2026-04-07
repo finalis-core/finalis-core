@@ -85,6 +85,56 @@ AdvancedPage::AdvancedPage(QWidget* parent) : QWidget(parent) {
   validator_intro->setWordWrap(true);
   validator_intro->setProperty("role", QVariant(QStringLiteral("muted")));
   validator_layout->addWidget(validator_intro);
+
+  auto* validator_register_box = new QGroupBox("Register Validator", validator);
+  validator_register_box->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+  auto* validator_register_layout = new QVBoxLayout(validator_register_box);
+  validator_register_layout->setSpacing(12);
+
+  auto* validator_register_intro = new QLabel(
+      "One-click registration uses finalized spendable coins only. The wallet checks operator readiness, reserves the bond, builds the join transaction, submits it, and tracks finalization and activation.",
+      validator_register_box);
+  validator_register_intro->setWordWrap(true);
+  validator_register_intro->setProperty("role", QVariant(QStringLiteral("muted")));
+  validator_register_layout->addWidget(validator_register_intro);
+
+  auto* validator_summary_grid = new QGridLayout();
+  validator_summary_grid->setHorizontalSpacing(14);
+  validator_summary_grid->setVerticalSpacing(10);
+  validator_summary_grid->setColumnStretch(1, 1);
+  validator_summary_grid->addWidget(new QLabel("Required bond", validator_register_box), 0, 0);
+  validator_required_bond_label_ = new QLabel("Not checked", validator_register_box);
+  validator_required_bond_label_->setWordWrap(true);
+  validator_summary_grid->addWidget(validator_required_bond_label_, 0, 1);
+  validator_summary_grid->addWidget(new QLabel("Available finalized balance", validator_register_box), 1, 0);
+  validator_available_balance_label_ = new QLabel("Not checked", validator_register_box);
+  validator_available_balance_label_->setWordWrap(true);
+  validator_summary_grid->addWidget(validator_available_balance_label_, 1, 1);
+  validator_summary_grid->addWidget(new QLabel("Readiness blockers", validator_register_box), 2, 0);
+  validator_blockers_label_ = new QLabel("Not checked", validator_register_box);
+  validator_blockers_label_->setWordWrap(true);
+  validator_summary_grid->addWidget(validator_blockers_label_, 2, 1);
+  validator_summary_grid->addWidget(new QLabel("Live tx / finalization status", validator_register_box), 3, 0);
+  validator_live_status_label_ = new QLabel("No registration tracked yet", validator_register_box);
+  validator_live_status_label_->setWordWrap(true);
+  validator_summary_grid->addWidget(validator_live_status_label_, 3, 1);
+  validator_register_layout->addLayout(validator_summary_grid);
+
+  auto* validator_actions = new QHBoxLayout();
+  validator_actions->setSpacing(8);
+  validator_action_button_ = new QPushButton("Register Validator", validator_register_box);
+  validator_refresh_button_ = new QPushButton("Refresh Status", validator_register_box);
+  validator_cancel_button_ = new QPushButton("Cancel Registration", validator_register_box);
+  validator_toggle_details_button_ = new QPushButton("Show Details", validator_register_box);
+  validator_actions->addWidget(validator_action_button_);
+  validator_actions->addWidget(validator_refresh_button_);
+  validator_actions->addWidget(validator_cancel_button_);
+  validator_actions->addStretch(1);
+  validator_actions->addWidget(validator_toggle_details_button_);
+  validator_register_layout->addLayout(validator_actions);
+
+  validator_layout->addWidget(validator_register_box);
+
   auto* validator_box = new QGroupBox("Validator Setup", validator);
   validator_box->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
   auto* validator_layout_box = new QVBoxLayout(validator_box);
@@ -142,19 +192,6 @@ AdvancedPage::AdvancedPage(QWidget* parent) : QWidget(parent) {
   validator_state_label_->setWordWrap(true);
   validator_grid->addWidget(validator_state_label_, 2, 1);
   validator_layout_box->addLayout(validator_grid);
-
-  auto* validator_actions = new QHBoxLayout();
-  validator_actions->setSpacing(8);
-  validator_action_button_ = new QPushButton("Start Validator Onboarding", validator_box);
-  validator_refresh_button_ = new QPushButton("Refresh Status", validator_box);
-  validator_cancel_button_ = new QPushButton("Cancel Registration", validator_box);
-  validator_toggle_details_button_ = new QPushButton("Show Details", validator_box);
-  validator_actions->addWidget(validator_action_button_);
-  validator_actions->addWidget(validator_refresh_button_);
-  validator_actions->addWidget(validator_cancel_button_);
-  validator_actions->addStretch(1);
-  validator_actions->addWidget(validator_toggle_details_button_);
-  validator_layout_box->addLayout(validator_actions);
 
   validator_details_container_ = new QWidget(validator_box);
   auto* validator_details_layout = new QVBoxLayout(validator_details_container_);

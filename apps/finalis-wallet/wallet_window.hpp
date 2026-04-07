@@ -265,6 +265,10 @@ class WalletWindow final : public QMainWindow {
   QLabel* validator_readiness_label_{nullptr};
   QLabel* validator_funding_label_{nullptr};
   QLabel* validator_state_label_{nullptr};
+  QLabel* validator_required_bond_label_{nullptr};
+  QLabel* validator_available_balance_label_{nullptr};
+  QLabel* validator_blockers_label_{nullptr};
+  QLabel* validator_live_status_label_{nullptr};
   QLabel* validator_summary_label_{nullptr};
   QPushButton* history_detail_button_{nullptr};
   QPushButton* overview_send_button_{nullptr};

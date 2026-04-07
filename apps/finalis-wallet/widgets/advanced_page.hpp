@@ -21,6 +21,10 @@ class AdvancedPage final : public QWidget {
   QLabel* validator_readiness_label() const { return validator_readiness_label_; }
   QLabel* validator_funding_label() const { return validator_funding_label_; }
   QLabel* validator_state_label() const { return validator_state_label_; }
+  QLabel* validator_required_bond_label() const { return validator_required_bond_label_; }
+  QLabel* validator_available_balance_label() const { return validator_available_balance_label_; }
+  QLabel* validator_blockers_label() const { return validator_blockers_label_; }
+  QLabel* validator_live_status_label() const { return validator_live_status_label_; }
   QPushButton* validator_action_button() const { return validator_action_button_; }
   QLineEdit* validator_db_path_edit() const { return validator_db_path_edit_; }
   QLineEdit* validator_key_path_edit() const { return validator_key_path_edit_; }
@@ -70,6 +74,10 @@ class AdvancedPage final : public QWidget {
   QLabel* validator_readiness_label_{nullptr};
   QLabel* validator_funding_label_{nullptr};
   QLabel* validator_state_label_{nullptr};
+  QLabel* validator_required_bond_label_{nullptr};
+  QLabel* validator_available_balance_label_{nullptr};
+  QLabel* validator_blockers_label_{nullptr};
+  QLabel* validator_live_status_label_{nullptr};
   QLabel* validator_summary_label_{nullptr};
   QPushButton* validator_action_button_{nullptr};
   QPushButton* validator_refresh_button_{nullptr};
