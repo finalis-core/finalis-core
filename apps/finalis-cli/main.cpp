@@ -37,6 +37,7 @@
 #include "genesis/embedded_mainnet.hpp"
 #include "genesis/genesis.hpp"
 #include "keystore/validator_keystore.hpp"
+#include "lightserver/client.hpp"
 #include "onboarding/validator_onboarding.hpp"
 #include "p2p/framing.hpp"
 #include "p2p/messages.hpp"
@@ -813,7 +814,7 @@ void print_dev_cli_help(std::ostream& os) {
      << "  finalis-cli ingress_range --url http://host:port/rpc --lane <n> --from <n> --to <n>\n"
      << "  finalis-cli ingress_verify_range --url http://host:port/rpc --lane <n> --from <n> --to <n>\n"
      << "  finalis-cli rpc_compare --urls http://a:19444/rpc,http://b:19444/rpc\n"
-     << "  finalis-cli broadcast_tx --host <ip> --port <p> --tx-hex <hex>\n";
+     << "  finalis-cli broadcast_tx [--url http://host:port/rpc | --host <ip> --port <p>] --tx-hex <hex>\n";
 }
 
 void print_cli_help(std::ostream& os, const std::string& mode) {
@@ -3863,12 +3864,14 @@ int main(int argc, char** argv) {
   }
 
   if (cmd == "broadcast_tx") {
+    std::string rpc_url;
     std::string host = "127.0.0.1";
-    std::uint16_t port = 18444;
+    std::uint16_t port = 19444;
     std::string tx_hex;
     for (int i = 2; i < argc; ++i) {
       std::string a = argv[i];
-      if (a == "--host" && i + 1 < argc) host = argv[++i];
+      if (a == "--url" && i + 1 < argc) rpc_url = argv[++i];
+      else if (a == "--host" && i + 1 < argc) host = argv[++i];
       else if (a == "--port" && i + 1 < argc) port = static_cast<std::uint16_t>(std::stoi(argv[++i]));
       else if (a == "--tx-hex" && i + 1 < argc) tx_hex = argv[++i];
     }
@@ -3882,29 +3885,24 @@ int main(int argc, char** argv) {
       std::cerr << "invalid tx hex\n";
       return 1;
     }
+    if (rpc_url.empty()) rpc_url = "http://" + host + ":" + std::to_string(port) + "/rpc";
 
-    auto fd_opt = connect_tcp(host, port);
-    if (!fd_opt.has_value()) {
-      std::cerr << "connect failed\n";
-      return 1;
+    std::string err;
+    const auto result = finalis::lightserver::rpc_broadcast_tx(rpc_url, *raw, &err);
+    std::cout << "rpc_url=" << rpc_url << "\n";
+    std::cout << "accepted=" << ((result.outcome == finalis::lightserver::BroadcastOutcome::Sent) ? "yes" : "no") << "\n";
+    if (!result.txid_hex.empty()) std::cout << "txid=" << result.txid_hex << "\n";
+    if (!result.message.empty()) std::cout << "message=" << result.message << "\n";
+    if (!result.error_code.empty()) std::cout << "error_code=" << result.error_code << "\n";
+    if (!result.error_message.empty()) std::cout << "error_message=" << result.error_message << "\n";
+    else if (!result.error.empty()) std::cout << "error=" << result.error << "\n";
+    std::cout << "retryable=" << (result.retryable ? "yes" : "no") << "\n";
+    std::cout << "retry_class=" << result.retry_class << "\n";
+    if (result.min_fee_rate_to_enter_when_full.has_value()) {
+      std::cout << "min_fee_rate_to_enter_when_full=" << *result.min_fee_rate_to_enter_when_full << "\n";
     }
-    const int fd = *fd_opt;
-
-    bool ok = do_handshake_v0(fd);
-    if (!ok) {
-      ::close(fd);
-      std::cerr << "handshake failed\n";
-      return 1;
-    }
-
-    ok = finalis::p2p::write_frame_fd(fd, finalis::p2p::Frame{finalis::p2p::MsgType::TX, finalis::p2p::ser_tx(finalis::p2p::TxMsg{*raw})});
-    ::close(fd);
-    if (!ok) {
-      std::cerr << "send tx failed\n";
-      return 1;
-    }
-    std::cout << "broadcasted tx\n";
-    return 0;
+    if (!err.empty()) std::cout << "rpc_error=" << err << "\n";
+    return result.outcome == finalis::lightserver::BroadcastOutcome::Sent ? 0 : 1;
   }
 
   std::cerr << "unknown command\n";

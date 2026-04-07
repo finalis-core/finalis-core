@@ -4323,6 +4323,58 @@ TEST(test_tx_status_reports_certified_ingress_before_finalization) {
   ASSERT_TRUE(resp.find("\"finalized\":false") != std::string::npos);
 }
 
+TEST(test_next_height_runtime_schedule_uses_canonical_state_not_mutable_runtime_checkpoint_cache) {
+  const std::string base = "/tmp/finalis_it_next_height_schedule_uses_canonical";
+
+  node::NodeConfig cfg;
+  cfg.disable_p2p = true;
+  cfg.node_id = 0;
+  cfg.max_committee = 1;
+  cfg.p2p_port = 0;
+  cfg.db_path = base + "/node0";
+  cfg.genesis_path = base + "/genesis.json";
+  cfg.allow_unsafe_genesis_override = true;
+  cfg.validator_key_file = cfg.db_path + "/keystore/validator.json";
+  cfg.validator_passphrase = "test-pass";
+
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base);
+  ASSERT_TRUE(write_mainnet_genesis_file(cfg.genesis_path, 1));
+
+  keystore::ValidatorKey key;
+  std::string kerr;
+  ASSERT_TRUE(keystore::create_validator_keystore(cfg.validator_key_file, cfg.validator_passphrase, "mainnet", "sc",
+                                                  deterministic_seed_for_node_id(0), &key, &kerr));
+
+  node::Node node(cfg);
+  ASSERT_TRUE(node.init());
+
+  const auto canonical_committee = node.committee_for_height_round_for_test(1, 0);
+  const auto canonical_leader = node.proposer_for_height_round_for_test(1, 0);
+  ASSERT_TRUE(!canonical_committee.empty());
+  ASSERT_TRUE(canonical_leader.has_value());
+
+  const auto keys = node::Node::deterministic_test_keypairs();
+  ASSERT_TRUE(keys.size() > 1u);
+  storage::FinalizedCommitteeCheckpoint corrupted;
+  corrupted.epoch_start_height = 1;
+  corrupted.epoch_seed.fill(0x5A);
+  corrupted.ticket_difficulty_bits = consensus::DEFAULT_TICKET_DIFFICULTY_BITS;
+  corrupted.ordered_members.push_back(keys[1].public_key);
+  corrupted.ordered_operator_ids.push_back(keys[1].public_key);
+  corrupted.ordered_base_weights.push_back(1);
+  corrupted.ordered_ticket_bonus_bps.push_back(0);
+  corrupted.ordered_final_weights.push_back(1);
+  corrupted.ordered_ticket_hashes.push_back(zero_hash());
+  corrupted.ordered_ticket_nonces.push_back(0);
+
+  ASSERT_TRUE(node.overwrite_runtime_next_height_checkpoint_for_test(corrupted));
+  ASSERT_EQ(node.committee_for_height_round_for_test(1, 0), canonical_committee);
+  ASSERT_EQ(node.proposer_for_height_round_for_test(1, 0), canonical_leader);
+
+  node.stop();
+}
+
 TEST(test_ingress_record_propagates_to_follower_before_finalization) {
   const std::string base = unique_test_base("/tmp/finalis_it_ingress_record_propagates");
   auto cluster = make_cluster(base, 2, 2, 2);

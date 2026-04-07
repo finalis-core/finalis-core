@@ -3482,6 +3482,14 @@ std::optional<p2p::GetIngressRangeMsg> Node::requested_ingress_range_for_test(in
   return it->second;
 }
 
+bool Node::overwrite_runtime_next_height_checkpoint_for_test(const storage::FinalizedCommitteeCheckpoint& checkpoint) {
+  std::lock_guard<std::mutex> lk(mu_);
+  const auto target_epoch = consensus::committee_epoch_start(finalized_height_ + 1, cfg_.network.committee_epoch_blocks);
+  if (checkpoint.epoch_start_height != target_epoch) return false;
+  finalized_committee_checkpoints_[target_epoch] = checkpoint;
+  return true;
+}
+
 bool Node::verify_quorum_certificate_locked(const QuorumCertificate& qc, std::vector<FinalitySig>* filtered,
                                             std::string* error) const {
   const auto committee = committee_for_height_round(qc.height, qc.round);
@@ -6189,6 +6197,7 @@ std::optional<FrontierProposal> Node::build_frontier_transition_locked(std::uint
       total_bytes += ingress.tx_bytes.size();
     }
   }
+
   SpecialValidationContext vctx{
       .network = &cfg_.network,
       .chain_id = &chain_id_,
@@ -7057,8 +7066,12 @@ std::vector<consensus::WeightedParticipant> Node::reward_participants_for_height
 }
 
 std::vector<PubKey32> Node::committee_for_height_round(std::uint64_t height, std::uint32_t round) const {
-  (void)round;
   if (height == finalized_height_ + 1) {
+    if (canonical_state_.has_value()) {
+      const auto canonical =
+          consensus::canonical_committee_for_height_round(canonical_derivation_config_locked(), *canonical_state_, height, round);
+      if (!canonical.empty()) return canonical;
+    }
     return epoch_committee_for_next_height_locked(height, round);
   }
 
@@ -7078,6 +7091,13 @@ std::vector<PubKey32> Node::committee_for_height_round(std::uint64_t height, std
 
 std::optional<PubKey32> Node::leader_for_height_round(std::uint64_t height, std::uint32_t round) const {
   if (height == finalized_height_ + 1) {
+    if (canonical_state_.has_value()) {
+      if (auto canonical =
+              consensus::canonical_leader_for_height_round(canonical_derivation_config_locked(), *canonical_state_, height, round);
+          canonical.has_value()) {
+        return canonical;
+      }
+    }
     return epoch_leader_for_next_height_locked(height, round);
   }
 
