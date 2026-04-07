@@ -257,6 +257,7 @@ class Node {
   std::string last_test_hook_error_for_test() const;
   std::optional<p2p::GetIngressRangeMsg> requested_ingress_range_for_test(int peer_id, std::uint32_t lane) const;
   bool overwrite_runtime_next_height_checkpoint_for_test(const storage::FinalizedCommitteeCheckpoint& checkpoint);
+  bool overwrite_runtime_frontier_cursor_for_test(std::uint64_t finalized_frontier);
 
   static std::vector<crypto::KeyPair> deterministic_test_keypairs();
 
@@ -340,6 +341,7 @@ class Node {
                                                bool clear_requested_sync = false);
 
   std::optional<FrontierProposal> build_frontier_transition_locked(std::uint64_t height, std::uint32_t round);
+  bool refresh_runtime_from_frontier_storage_locked(const char* reason, std::string* error = nullptr);
   void broadcast_epoch_ticket(const consensus::EpochTicket& ticket);
   void broadcast_propose(const FrontierProposal& proposal, const std::optional<QuorumCertificate>& justify_qc = std::nullopt,
                          const std::optional<TimeoutCertificate>& justify_tc = std::nullopt);

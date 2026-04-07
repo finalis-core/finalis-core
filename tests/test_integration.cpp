@@ -4375,6 +4375,33 @@ TEST(test_next_height_runtime_schedule_uses_canonical_state_not_mutable_runtime_
   node.stop();
 }
 
+TEST(test_frontier_build_repairs_runtime_cursor_from_frontier_storage) {
+  const std::string base = "/tmp/finalis_it_frontier_build_repairs_runtime_cursor";
+  std::filesystem::remove_all(base);
+  std::filesystem::create_directories(base);
+
+  auto cfg = single_node_cfg(base, 1);
+  ASSERT_TRUE(write_mainnet_genesis_file(cfg.genesis_path, 1));
+
+  keystore::ValidatorKey key;
+  std::string kerr;
+  ASSERT_TRUE(keystore::create_validator_keystore(cfg.validator_key_file, cfg.validator_passphrase, "mainnet", "sc",
+                                                  deterministic_seed_for_node_id(0), &key, &kerr));
+
+  node::Node node(cfg);
+  ASSERT_TRUE(node.init());
+
+  ASSERT_TRUE(node.overwrite_runtime_frontier_cursor_for_test(1));
+  auto proposal = node.build_frontier_proposal_for_test(1, 0);
+  if (!proposal.has_value()) {
+    throw std::runtime_error("frontier proposal repair build failed: " + node.last_test_hook_error_for_test());
+  }
+  ASSERT_EQ(proposal->transition.prev_frontier, 0u);
+  ASSERT_EQ(proposal->transition.prev_frontier, proposal->transition.prev_vector.total_count());
+
+  node.stop();
+}
+
 TEST(test_ingress_record_propagates_to_follower_before_finalization) {
   const std::string base = unique_test_base("/tmp/finalis_it_ingress_record_propagates");
   auto cluster = make_cluster(base, 2, 2, 2);

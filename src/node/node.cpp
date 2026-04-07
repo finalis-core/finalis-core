@@ -3537,6 +3537,13 @@ bool Node::overwrite_runtime_next_height_checkpoint_for_test(const storage::Fina
   return true;
 }
 
+bool Node::overwrite_runtime_frontier_cursor_for_test(std::uint64_t finalized_frontier) {
+  std::lock_guard<std::mutex> lk(mu_);
+  if (!canonical_state_.has_value()) return false;
+  canonical_state_->finalized_frontier = finalized_frontier;
+  return true;
+}
+
 bool Node::verify_quorum_certificate_locked(const QuorumCertificate& qc, std::vector<FinalitySig>* filtered,
                                             std::string* error) const {
   const auto committee = committee_for_height_round(qc.height, qc.round);
@@ -6207,6 +6214,21 @@ std::optional<FrontierProposal> Node::build_frontier_transition_locked(std::uint
     last_test_hook_error_ = "missing-canonical-state";
     return std::nullopt;
   }
+  if (canonical_state_->finalized_frontier != canonical_state_->finalized_frontier_vector.total_count()) {
+    std::string repair_error;
+    log_line("finalized-state-invariant-violation source=frontier-build-runtime-cursor-mismatch height=" +
+             std::to_string(height) + " finalized_frontier=" + std::to_string(canonical_state_->finalized_frontier) +
+             " vector_total=" + std::to_string(canonical_state_->finalized_frontier_vector.total_count()));
+    if (!refresh_runtime_from_frontier_storage_locked("frontier-build-runtime-cursor-mismatch", &repair_error)) {
+      last_test_hook_error_ = "frontier-build-runtime-refresh-failed:" + repair_error;
+      return std::nullopt;
+    }
+    if (!canonical_state_.has_value() ||
+        canonical_state_->finalized_frontier != canonical_state_->finalized_frontier_vector.total_count()) {
+      last_test_hook_error_ = "frontier-build-runtime-cursor-mismatch-persisted";
+      return std::nullopt;
+    }
+  }
   if (!finalized_identity_valid_for_frontier_runtime(finalized_height_, finalized_identity_)) {
     last_test_hook_error_ = "frontier-parent-identity-kind-mismatch";
     return std::nullopt;
@@ -6288,6 +6310,60 @@ std::optional<FrontierProposal> Node::build_frontier_transition_locked(std::uint
   }
   last_test_hook_error_.clear();
   return FrontierProposal{result.transition, selection.ordered_records};
+}
+
+bool Node::refresh_runtime_from_frontier_storage_locked(const char* reason, std::string* error) {
+  auto genesis_json = db_.get(storage::key_genesis_json());
+  if (!genesis_json.has_value()) {
+    if (error) *error = "missing-genesis-json";
+    return false;
+  }
+  const std::string js(genesis_json->begin(), genesis_json->end());
+  auto genesis_doc = genesis::parse_json(js);
+  if (!genesis_doc.has_value()) {
+    if (error) *error = "invalid-genesis-json";
+    return false;
+  }
+
+  consensus::CanonicalGenesisState genesis_state;
+  genesis_state.genesis_artifact_id = genesis::block_id(*genesis_doc);
+  if (auto stored_genesis_artifact = db_.get(storage::key_genesis_artifact());
+      stored_genesis_artifact.has_value() && stored_genesis_artifact->size() == 32) {
+    std::copy(stored_genesis_artifact->begin(), stored_genesis_artifact->end(), genesis_state.genesis_artifact_id.begin());
+  }
+  genesis_state.initial_validators = genesis_doc->initial_validators;
+  if (bootstrap_template_mode_ && finalized_height_ == 0 && bootstrap_validator_pubkey_.has_value()) {
+    genesis_state.initial_validators = {*bootstrap_validator_pubkey_};
+  }
+
+  const auto derivation_cfg = canonical_derivation_config_locked();
+  consensus::CanonicalDerivedState canonical_genesis_state;
+  std::string canonical_error;
+  if (!consensus::build_genesis_canonical_state(derivation_cfg, genesis_state, &canonical_genesis_state, &canonical_error)) {
+    if (error) *error = "canonical-genesis-failed:" + canonical_error;
+    return false;
+  }
+
+  consensus::CanonicalDerivedState derived_state;
+  std::string derivation_error;
+  if (!consensus::derive_canonical_state_from_frontier_storage(derivation_cfg, canonical_genesis_state, db_, &derived_state,
+                                                               &derivation_error)) {
+    if (error) *error = "frontier-derive-failed:" + derivation_error;
+    return false;
+  }
+  if (derived_state.finalized_height != finalized_height_ || derived_state.finalized_identity.id != finalized_identity_.id) {
+    if (error) {
+      *error = "frontier-derive-tip-mismatch local_height=" + std::to_string(finalized_height_) +
+               " derived_height=" + std::to_string(derived_state.finalized_height);
+    }
+    return false;
+  }
+
+  hydrate_runtime_from_canonical_state_locked(derived_state);
+  log_line(std::string("canonical-runtime-refresh source=") + reason + " height=" + std::to_string(finalized_height_) +
+           " finalized_frontier=" + std::to_string(canonical_state_->finalized_frontier) + " vector_total=" +
+           std::to_string(canonical_state_->finalized_frontier_vector.total_count()));
+  return true;
 }
 
 void Node::broadcast_propose(const FrontierProposal& proposal, const std::optional<QuorumCertificate>& justify_qc,
