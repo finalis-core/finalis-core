@@ -2,6 +2,8 @@ name: finalis-mint-packaging
 
 on:
   push:
+    branches-ignore:
+      - 'windows-installer-test'
     paths:
       - 'services/finalis-mint/**'
       - 'docs/FINALIS_MINT_RUNBOOK.md'
@@ -12,6 +14,8 @@ on:
       - 'CMakeLists.txt'
       - '.github/workflows/finalis-mint-packaging.yml'
   pull_request:
+    branches-ignore:
+      - 'windows-installer-test'
     paths:
       - 'services/finalis-mint/**'
       - 'docs/FINALIS_MINT_RUNBOOK.md'

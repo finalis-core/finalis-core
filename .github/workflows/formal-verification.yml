@@ -2,6 +2,8 @@ name: formal-verification
 
 on:
   push:
+    branches-ignore:
+      - "windows-installer-test"
     paths:
       - "formal/**"
       - "scripts/run_tlc.sh"
@@ -11,6 +13,8 @@ on:
       - "README.md"
       - ".github/workflows/formal-verification.yml"
   pull_request:
+    branches-ignore:
+      - "windows-installer-test"
     paths:
       - "formal/**"
       - "scripts/run_tlc.sh"

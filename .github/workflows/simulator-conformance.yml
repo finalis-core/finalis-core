@@ -2,6 +2,8 @@ name: simulator-conformance
 
 on:
   push:
+    branches-ignore:
+      - "windows-installer-test"
     paths:
       - "src/consensus/finalized_committee.cpp"
       - "src/consensus/finalized_committee.hpp"
@@ -21,6 +23,8 @@ on:
       - "CMakeLists.txt"
       - ".github/workflows/simulator-conformance.yml"
   pull_request:
+    branches-ignore:
+      - "windows-installer-test"
     paths:
       - "src/consensus/finalized_committee.cpp"
       - "src/consensus/finalized_committee.hpp"
