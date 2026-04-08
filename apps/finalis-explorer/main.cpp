@@ -38,6 +38,13 @@ struct Config {
   std::string rpc_url{"http://127.0.0.1:19444/rpc"};
 };
 
+template <typename T>
+struct LookupResult;
+
+struct TxResult;
+struct TransitionResult;
+LookupResult<TxResult> fetch_tx_result(const Config& cfg, const std::string& txid_hex);
+
 struct ApiError {
   int http_status{500};
   std::string code;
@@ -145,6 +152,7 @@ struct TxInputResult {
   std::string prev_txid;
   std::uint32_t vout{0};
   std::optional<std::string> address;
+  std::optional<std::uint64_t> amount;
 };
 
 struct TxOutputResult {
@@ -198,6 +206,9 @@ struct AddressUtxoResult {
 struct AddressHistoryItemResult {
   std::string txid;
   std::uint64_t height{0};
+  std::string direction;
+  std::int64_t net_amount{0};
+  std::string detail;
 };
 
 struct AddressHistoryResult {
@@ -366,6 +377,58 @@ std::string format_amount(std::uint64_t value) {
   return oss.str();
 }
 
+std::string format_signed_amount(std::int64_t value) {
+  const bool negative = value < 0;
+  const auto magnitude = negative ? static_cast<std::uint64_t>(-value) : static_cast<std::uint64_t>(value);
+  return std::string(negative ? "-" : "+") + format_amount(magnitude);
+}
+
+std::string render_summary_metric_card(const std::string& label, const std::string& value, const std::string& sub = {}) {
+  std::ostringstream oss;
+  oss << "<div class=\"metric-card\"><span class=\"label\">" << html_escape(label) << "</span><span class=\"value\">"
+      << html_escape(value) << "</span>";
+  if (!sub.empty()) oss << "<span class=\"sub\">" << html_escape(sub) << "</span>";
+  oss << "</div>";
+  return oss.str();
+}
+
+struct TransitionSummary {
+  std::uint64_t finalized_out{0};
+  std::size_t distinct_recipient_count{0};
+  std::map<std::string, std::size_t> flow_mix;
+};
+
+TransitionSummary compute_transition_summary(const Config& cfg, const TransitionResult& transition) {
+  TransitionSummary summary;
+  std::set<std::string> distinct_recipients;
+  for (const auto& txid : transition.txids) {
+    auto tx_lookup = fetch_tx_result(cfg, txid);
+    if (!tx_lookup.value.has_value()) continue;
+    summary.finalized_out += tx_lookup.value->total_out;
+    ++summary.flow_mix[tx_lookup.value->flow_kind];
+    for (const auto& out : tx_lookup.value->outputs) {
+      if (out.address.has_value() && !out.address->empty()) distinct_recipients.insert(*out.address);
+    }
+  }
+  summary.distinct_recipient_count = distinct_recipients.size();
+  return summary;
+}
+
+std::string summarize_flow_mix(const std::map<std::string, std::size_t>& flow_mix) {
+  std::ostringstream oss;
+  if (flow_mix.empty()) {
+    oss << "no classified finalized txs";
+  } else {
+    bool first = true;
+    for (const auto& [kind, count] : flow_mix) {
+      if (!first) oss << ", ";
+      first = false;
+      oss << kind << "=" << count;
+    }
+  }
+  return oss.str();
+}
+
 std::string format_timestamp(std::uint64_t ts) {
   std::time_t tt = static_cast<std::time_t>(ts);
   std::tm tm{};
@@ -437,6 +500,12 @@ std::string tx_status_label(bool finalized, bool credit_safe) {
 std::string credit_decision_text(bool finalized, bool credit_safe) {
   if (finalized && credit_safe) return "Safe to credit";
   return "Do not credit";
+}
+
+std::string uppercase_copy(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+  return value;
 }
 
 std::string yes_no(bool value) { return value ? "YES" : "NO"; }
@@ -511,6 +580,40 @@ std::string amount_span(std::uint64_t value, const char* css_class) {
   return "<span class=\"" + std::string(css_class) + "\">" + html_escape(format_amount(value)) + "</span>";
 }
 
+std::string status_chip(const std::string& label, const std::string& tone) {
+  return "<span class=\"status-chip status-chip-" + tone + "\">" + html_escape(label) + "</span>";
+}
+
+std::string tone_for_sync(const StatusResult& status) {
+  if (status.bootstrap_sync_incomplete || status.peer_height_disagreement) return "warn";
+  if (status.finalized_lag.has_value() && *status.finalized_lag > 0) return "muted";
+  return "good";
+}
+
+std::string sync_summary_text(const StatusResult& status) {
+  if (status.bootstrap_sync_incomplete) return "Bootstrap sync incomplete";
+  if (status.peer_height_disagreement) return "Peer disagreement detected";
+  if (status.finalized_lag.has_value()) return "Finalized lag " + std::to_string(*status.finalized_lag);
+  return "Healthy";
+}
+
+std::string fallback_chip(const StatusResult& status) {
+  if (!status.availability_checkpoint_fallback_reason.has_value() ||
+      status.availability_checkpoint_fallback_reason->empty() ||
+      *status.availability_checkpoint_fallback_reason == "none") {
+    return status_chip("Fallback Clear", "good");
+  }
+  return status_chip("Fallback " + uppercase_copy(*status.availability_checkpoint_fallback_reason), "warn");
+}
+
+std::string operator_chip(const StatusResult& status) {
+  if (!status.availability_local_operator_known.value_or(false)) return status_chip("Operator Unknown", "muted");
+  const auto raw = status.availability_local_operator_status.value_or("unknown");
+  const auto upper = uppercase_copy(raw);
+  const std::string tone = (upper == "ACTIVE" || upper == "QUALIFIED") ? "good" : (upper == "PROBATION" ? "warn" : "muted");
+  return status_chip("Operator " + upper, tone);
+}
+
 std::string display_identity(const std::optional<std::string>& value) {
   if (!value.has_value() || value->empty()) return "<span class=\"muted\">unknown</span>";
   if (finalis::address::decode(*value).has_value()) {
@@ -575,55 +678,126 @@ FlowClassification classify_tx_flow(const std::vector<TxInputResult>& inputs, co
   return flow;
 }
 
+AddressHistoryItemResult classify_address_history_item(const std::string& address, const TxResult& tx) {
+  std::uint64_t credited = 0;
+  std::uint64_t debited = 0;
+  for (const auto& input : tx.inputs) {
+    if (input.address.has_value() && *input.address == address) debited += input.amount.value_or(0);
+  }
+  for (const auto& output : tx.outputs) {
+    if (output.address.has_value() && *output.address == address) credited += output.amount;
+  }
+
+  AddressHistoryItemResult item;
+  item.txid = tx.txid;
+  item.height = tx.finalized_height.value_or(0);
+
+  if (debited == 0 && credited > 0) {
+    item.direction = "received";
+    item.net_amount = static_cast<std::int64_t>(credited);
+    item.detail = "Finalized credit to this address";
+  } else if (debited > 0 && credited == 0) {
+    item.direction = "sent";
+    item.net_amount = -static_cast<std::int64_t>(debited);
+    item.detail = "Finalized spend from this address with no decoded return output";
+  } else if (debited > 0 && credited > 0) {
+    item.direction = "self-transfer";
+    item.net_amount = static_cast<std::int64_t>(credited) - static_cast<std::int64_t>(debited);
+    item.detail = "This address appears on both finalized inputs and outputs";
+  } else {
+    item.direction = "related";
+    item.net_amount = 0;
+    item.detail = "Address is present in finalized history but could not be classified precisely";
+  }
+  return item;
+}
+
 std::string global_finalized_banner() {
   return "<div class=\"global-banner\">Explorer view is finalized-state only. Only finalized activity is shown.</div>";
 }
 
-std::string page_layout(const std::string& title, const std::string& body) {
+std::string top_nav(const std::string& active) {
+  const auto item = [&](const std::string& label, const std::string& href, const std::string& key) {
+    const std::string cls = active == key ? "top-tab top-tab-active" : "top-tab";
+    return "<a class=\"" + cls + "\" href=\"" + href + "\">" + html_escape(label) + "</a>";
+  };
+  std::ostringstream oss;
+  oss << "<div class=\"top-nav\">"
+      << item("Overview", "/", "overview")
+      << item("Committee", "/committee", "committee")
+      << item("Tx", "/tx/", "tx")
+      << item("Transition", "/transition/", "transition")
+      << item("Address", "/address/", "address")
+      << "</div>";
+  return oss.str();
+}
+
+std::string page_layout(const std::string& title, const std::string& body, const std::string& active_nav = {}) {
   std::ostringstream oss;
   oss << "<!doctype html><html><head><meta charset=\"utf-8\">"
       << "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
       << "<title>" << html_escape(title) << "</title>"
       << "<style>"
-         "body{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#f5f5f2;color:#171717;margin:0;padding:clamp(12px,2vw,24px);}"
-         "main{max-width:1080px;width:min(100%,1080px);margin:0 auto;}"
+         "body{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:radial-gradient(circle at top,#f8f1dc 0%,#f5f5f2 28%,#f1f1ed 100%);color:#171717;margin:0;padding:clamp(14px,2vw,26px);}"
+         "main{max-width:1160px;width:min(100%,1160px);margin:0 auto;}"
          "a{color:#0f4c81;text-decoration:none;}a:hover{text-decoration:underline;}"
-         "h1,h2{margin:0 0 12px 0;}h1{font-size:28px;}h2{font-size:18px;margin-top:28px;}"
-         ".muted{color:#5b5b5b;}.card{background:#fff;border:1px solid #d7d7d1;border-radius:10px;padding:16px 18px;margin:16px 0;}"
-         ".grid{display:grid;grid-template-columns:minmax(140px,220px) minmax(0,1fr);gap:8px 14px;align-items:start;}"
+         "h1,h2{margin:0 0 12px 0;}h1{font-size:34px;line-height:1.05;letter-spacing:-.02em;}h2{font-size:20px;margin-top:30px;}"
+         ".muted{color:#5b5b5b;line-height:1.45;}"
+         ".card{background:rgba(255,255,255,.88);backdrop-filter:blur(6px);border:1px solid #ddd9cd;border-radius:18px;padding:18px 20px;margin:18px 0;box-shadow:0 12px 30px rgba(56,48,30,.06);}"
+         ".hero-card{padding:22px 24px;background:linear-gradient(180deg,#fffdf5 0%,#fff 100%);}"
+         ".grid{display:grid;grid-template-columns:minmax(180px,260px) minmax(0,1fr);gap:10px 16px;align-items:start;}"
+         ".grid>div:nth-child(odd){color:#5b5b5b;font-size:13px;text-transform:uppercase;letter-spacing:.05em;}"
+         ".grid>div:nth-child(even){font-size:15px;line-height:1.45;}"
          ".badge{display:inline-block;padding:10px 16px;border-radius:999px;font-size:16px;font-weight:800;letter-spacing:.08em;max-width:100%;white-space:normal;text-align:center;overflow-wrap:anywhere;}"
          ".badge-finalized{background:#d9f0d8;color:#124b19;border:2px solid #5ba55e;box-shadow:0 0 0 2px rgba(91,165,94,.12) inset;}"
          ".badge-unfinalized{background:#f6e2d8;color:#8a3110;border:2px solid #c56742;box-shadow:0 0 0 2px rgba(197,103,66,.12) inset;}"
          ".table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;}"
-         "table{width:100%;border-collapse:collapse;font-size:14px;min-width:560px;}th,td{padding:8px 10px;border-bottom:1px solid #e3e3de;text-align:left;vertical-align:top;overflow-wrap:anywhere;word-break:break-word;}"
-         "th{color:#4f4f4f;font-weight:700;}code{font-size:13px;overflow-wrap:anywhere;word-break:break-word;}"
+         "table{width:100%;border-collapse:collapse;font-size:14px;min-width:620px;}th,td{padding:10px 10px;border-bottom:1px solid #e7e2d8;text-align:left;vertical-align:top;overflow-wrap:anywhere;word-break:break-word;}"
+         "th{color:#4f4f4f;font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.05em;}code{font-size:13px;overflow-wrap:anywhere;word-break:break-word;}"
          ".num{text-align:right;white-space:nowrap;}"
          ".mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}"
-         ".mono-block{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;max-width:100%;padding:10px 12px;background:#f7f7f4;border:1px solid #e3e3de;border-radius:8px;overflow-wrap:anywhere;word-break:break-word;}"
+         ".mono-block{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;max-width:100%;padding:10px 12px;background:#faf9f3;border:1px solid #e6e0d4;border-radius:10px;overflow-wrap:anywhere;word-break:break-word;}"
          ".mono-block code{flex:1 1 auto;min-width:0;white-space:pre-wrap;}"
-         ".copy-button{flex:0 0 auto;background:#ecece7;border:1px solid #cfcfc6;border-radius:6px;padding:5px 9px;font:inherit;font-size:12px;color:#303030;cursor:pointer;}"
-         ".copy-button:hover{background:#e2e2db;}"
+         ".copy-button{flex:0 0 auto;background:#f4efdf;border:1px solid #d5c8a2;border-radius:10px;padding:6px 10px;font:inherit;font-size:12px;color:#4b3b13;cursor:pointer;box-shadow:0 1px 0 rgba(255,255,255,.7) inset;}"
+         ".copy-button:hover{background:#eee4c7;}"
          ".copy-button-row{display:flex;flex-wrap:wrap;gap:8px;}"
          ".amount-in{color:#137c34;font-weight:700;}"
          ".amount-out{color:#b02b2b;font-weight:700;}"
          ".value-cell{min-width:0;overflow-wrap:anywhere;word-break:break-word;}"
-         "ul{padding-left:18px;} .note{padding:12px 14px;background:#f2f2ed;border-left:4px solid #8a8a80;border-radius:6px;}"
-         ".nav{margin-bottom:12px;font-size:14px;}"
-         ".global-banner{margin:0 0 18px 0;padding:12px 14px;background:#fff3d6;border:1px solid #d8b96a;border-radius:8px;color:#5e4300;font-weight:700;}"
-         ".status-hero{display:flex;justify-content:space-between;gap:16px;align-items:center;flex-wrap:wrap;}"
+         "ul{padding-left:18px;} .note{padding:13px 15px;background:#f7f4eb;border-left:4px solid #8a8a80;border-radius:10px;line-height:1.45;}"
+         ".nav{margin-bottom:14px;font-size:14px;}"
+         ".global-banner{margin:0 0 18px 0;padding:13px 15px;background:#fff3d6;border:1px solid #d8b96a;border-radius:12px;color:#5e4300;font-weight:700;box-shadow:0 6px 18px rgba(126,93,9,.06);}"
+         ".status-hero{display:flex;justify-content:space-between;gap:18px;align-items:center;flex-wrap:wrap;}"
          ".status-hero>div{min-width:0;}"
-         ".decision-line{margin-top:14px;padding:12px 14px;border-radius:8px;font-weight:800;letter-spacing:.03em;background:#eef6ea;color:#18461f;border:1px solid #9dc69b;}"
+         ".decision-line{margin-top:14px;padding:13px 15px;border-radius:12px;font-weight:800;letter-spacing:.03em;background:#eef6ea;color:#18461f;border:1px solid #9dc69b;}"
          ".summary-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;}"
          ".inline-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}"
-         ".copy-button-inline{background:#f0f0eb;border:1px solid #d0d0c7;border-radius:6px;padding:2px 7px;font:inherit;font-size:11px;color:#404040;cursor:pointer;}"
-         ".copy-button-inline:hover{background:#e6e6de;}"
+         ".copy-button-inline{background:#f7f2e2;border:1px solid #ddcfab;border-radius:8px;padding:2px 7px;font:inherit;font-size:11px;color:#574310;cursor:pointer;}"
+         ".copy-button-inline:hover{background:#eee5ca;}"
          ".recent-list{display:grid;gap:12px;}"
          ".recent-item{border:1px solid #e3e3de;border-radius:8px;padding:12px;background:#fbfbf8;}"
          ".recent-item-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap;margin-bottom:10px;}"
          ".recent-meta{display:grid;grid-template-columns:minmax(110px,180px) minmax(0,1fr);gap:6px 12px;font-size:14px;}"
          ".route-actions{display:flex;flex-wrap:wrap;gap:8px;}"
          ".weight-flow{white-space:nowrap;}"
-         "@media (max-width:780px){h1{font-size:24px;}.grid{grid-template-columns:1fr;}.card{padding:14px 16px;}.badge{font-size:14px;padding:8px 12px;}.mono-block{flex-direction:column;}.copy-button{align-self:flex-start;}}"
+         ".hero-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:16px;}"
+         ".metric-card{padding:14px 16px;border-radius:14px;background:linear-gradient(180deg,#fffdfa 0%,#f7f2e6 100%);border:1px solid #e7ddc6;}"
+         ".metric-card .label{display:block;color:#6e644d;font-size:12px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;}"
+         ".metric-card .value{display:block;font-size:22px;font-weight:800;line-height:1.1;}"
+         ".metric-card .sub{display:block;margin-top:6px;color:#5b5b5b;line-height:1.4;}"
+         ".top-nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 16px 0;}"
+         ".top-tab{display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:999px;background:rgba(255,255,255,.72);border:1px solid #e4dbc4;color:#5d522f;text-decoration:none;font-size:13px;font-weight:700;letter-spacing:.03em;}"
+         ".top-tab:hover{background:#fff7e3;text-decoration:none;}"
+         ".top-tab-active{background:#f1e3b7;border-color:#caa752;color:#3f300c;box-shadow:0 6px 18px rgba(126,93,9,.08);}"
+         ".status-chip{display:inline-flex;align-items:center;padding:5px 10px;border-radius:999px;font-size:12px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;}"
+         ".status-chip-good{background:#e4f5df;color:#1c5c20;border:1px solid #89c28b;}"
+         ".status-chip-warn{background:#fff1d8;color:#7b4c06;border:1px solid #dfb267;}"
+         ".status-chip-muted{background:#eceae3;color:#5d5b52;border:1px solid #d7d2c7;}"
+         "details.disclosure{margin-top:14px;border-top:1px solid #ebe4d4;padding-top:12px;}"
+         "details.disclosure summary{cursor:pointer;font-weight:700;color:#5d522f;}"
+         "details.disclosure[open] summary{margin-bottom:10px;}"
+         ".soft-empty{padding:16px 18px;border-radius:14px;background:linear-gradient(180deg,#fbfaf5 0%,#f4f1e7 100%);border:1px dashed #d6cdaa;color:#5a5342;}"
+         "@media (max-width:780px){h1{font-size:26px;}.grid{grid-template-columns:1fr;}.card{padding:15px 16px;}.badge{font-size:14px;padding:8px 12px;}.mono-block{flex-direction:column;}.copy-button{align-self:flex-start;}}"
          "@media (max-width:560px){body{padding:12px;}table{min-width:460px;font-size:13px;}th,td{padding:7px 8px;}}"
       << "</style><script>"
          "function copyText(btn){"
@@ -636,6 +810,7 @@ std::string page_layout(const std::string& title, const std::string& body) {
          "}"
       << "</script></head><body><main>"
       << "<div class=\"nav\"><a href=\"/\">Finalis Explorer</a></div>"
+      << top_nav(active_nav)
       << global_finalized_banner()
       << body << "</main></body></html>";
   return oss.str();
@@ -844,7 +1019,7 @@ LookupResult<CommitteeResult> fetch_committee_result(const Config& cfg, std::uin
 
 std::string render_status_json(const StatusResult& result);
 std::string render_tx_json(const TxResult& result);
-std::string render_transition_json(const TransitionResult& result);
+std::string render_transition_json(const Config& cfg, const TransitionResult& result);
 std::string render_address_json(const AddressResult& result);
 std::string render_search_json(const SearchResult& result);
 std::string render_committee_json(const CommitteeResult& result);
@@ -852,14 +1027,28 @@ std::string render_recent_tx_json(const std::vector<RecentTxResult>& items);
 
 std::string render_root(const Config& cfg) {
   std::ostringstream body;
-  body << "<h1>Finalis Explorer</h1>"
-       << "<div class=\"card\"><div class=\"note\">Thin explorer backed by lightserver for exchange and operator support."
-       << " All views are finalized-state only.</div></div>";
+  body << "<div class=\"card hero-card\"><h1>Finalis Explorer</h1>"
+       << "<div class=\"note\">Finalized-state explorer for operators, wallets, and exchanges. It intentionally shows only finalized chain state and hides mempool ambiguity.</div>";
+  auto status = fetch_status_result(cfg);
+  if (status.value.has_value()) {
+    body << "<div class=\"hero-metrics\">"
+         << "<div class=\"metric-card\"><span class=\"label\">Finalized Tip</span><span class=\"value\">" << status.value->finalized_height
+         << "</span><span class=\"sub\">" << html_escape(short_hex(status.value->finalized_transition_hash)) << "</span></div>"
+         << "<div class=\"metric-card\"><span class=\"label\">Protocol Reserve</span><span class=\"value\">"
+         << html_escape(status.value->protocol_reserve_balance.has_value() ? format_amount(*status.value->protocol_reserve_balance) : std::string("n/a"))
+         << "</span><span class=\"sub\">Reserved by protocol issuance for long-horizon monetary rules.</span></div>"
+         << "<div class=\"metric-card\"><span class=\"label\">Peers</span><span class=\"value\">" << status.value->healthy_peer_count
+         << "</span><span class=\"sub\">healthy, " << status.value->established_peer_count << " established</span></div>"
+         << "<div class=\"metric-card\"><span class=\"label\">Sync</span><span class=\"value\">"
+         << (status.value->finalized_lag.has_value() ? std::to_string(*status.value->finalized_lag) : std::string("n/a"))
+         << "</span><span class=\"sub\">finalized lag</span></div>"
+         << "</div>";
+  }
+  body << "</div>";
   body << "<div class=\"card\"><h2>Search</h2><form method=\"GET\" action=\"/search\">"
        << "<input type=\"text\" name=\"q\" placeholder=\"txid, transition height/hash, or address\" "
        << "style=\"width:min(100%,720px);padding:10px 12px;font:inherit;border:1px solid #cfcfc6;border-radius:8px;\"> "
        << "<button type=\"submit\" class=\"copy-button\">Search</button></form></div>";
-  auto status = fetch_status_result(cfg);
   body << "<div class=\"card\"><div class=\"status-hero\"><div><h2>Backend</h2></div>";
   if (status.value.has_value()) {
     body << "<div style=\"max-width:340px;flex:0 1 340px;\">"
@@ -876,31 +1065,28 @@ std::string render_root(const Config& cfg) {
   body << "</div><div class=\"grid\">";
   body << "<div>Lightserver RPC</div><div class=\"value-cell\">" << mono_value(cfg.rpc_url) << "</div>";
   if (status.value.has_value()) {
-    body << "<div>Network</div><div>" << html_escape(status.value->network) << "</div>"
-         << "<div>Network ID</div><div class=\"value-cell\">" << mono_value(status.value->network_id) << "</div>"
-         << "<div>Genesis Hash</div><div class=\"value-cell\">" << mono_value(status.value->genesis_hash) << "</div>"
+    body << "<div>Runtime Status</div><div>" << status_chip(sync_summary_text(*status.value), tone_for_sync(*status.value)) << " "
+         << fallback_chip(*status.value) << " " << operator_chip(*status.value) << "</div>"
+         << "<div>Network</div><div>" << html_escape(status.value->network) << "</div>"
          << "<div>Finalized Tip</div><div class=\"value-cell\">" << link_transition_height(status.value->finalized_height) << " <code>" << html_escape(short_hex(status.value->finalized_transition_hash))
          << "</code> " << finalized_badge(true) << "</div>"
          << "<div>Version</div><div>" << html_escape(status.value->backend_version) << "</div>"
-         << "<div>Wallet API</div><div>" << html_escape(status.value->wallet_api_version) << "</div>"
          << "<div>Peers</div><div>healthy=" << status.value->healthy_peer_count << ", established=" << status.value->established_peer_count << "</div>"
          << "<div>Finality Committee</div><div>size=" << status.value->latest_finality_committee_size
-         << ", quorum=" << status.value->latest_finality_quorum_threshold << "</div>"
-         << "<div>Sync</div><div>";
-    if (status.value->bootstrap_sync_incomplete) {
-      body << "bootstrap catch-up incomplete";
-    } else if (status.value->peer_height_disagreement) {
-      body << "peer disagreement detected";
-    } else if (status.value->finalized_lag.has_value()) {
-      body << "finalized lag=" << *status.value->finalized_lag;
-    } else {
-      body << "healthy";
-    }
-    body << "</div>";
+         << ", quorum=" << status.value->latest_finality_quorum_threshold << "</div>";
   } else {
     body << "<div>Status</div><div class=\"muted\">Unavailable: " << html_escape(status.error->message) << "</div>";
   }
-  body << "</div></div>";
+  body << "</div>";
+  if (status.value.has_value()) {
+    body << "<details class=\"disclosure\"><summary>Show backend internals</summary><div class=\"grid\">"
+         << "<div>Network ID</div><div class=\"value-cell\">" << mono_value(status.value->network_id) << "</div>"
+         << "<div>Genesis Hash</div><div class=\"value-cell\">" << mono_value(status.value->genesis_hash) << "</div>"
+         << "<div>Wallet API</div><div>" << html_escape(status.value->wallet_api_version) << "</div>"
+         << "<div>Sync Detail</div><div>" << html_escape(sync_summary_text(*status.value)) << "</div>"
+         << "</div></details>";
+  }
+  body << "</div>";
   if (status.value.has_value()) {
     body << "<div class=\"card\"><h2>" << html_escape(ticket_pow_title(*status.value))
          << "</h2><div class=\"note\">" << html_escape(ticket_pow_note(*status.value)) << "</div>"
@@ -943,22 +1129,17 @@ std::string render_root(const Config& cfg) {
       }
       body << "</tbody></table></div>";
     } else {
-      body << "<div class=\"note\">Current finalized committee operator detail is unavailable from the backend. Check the finalized committee checkpoint and lightserver verbose committee view.</div>";
+      body << "<div class=\"soft-empty\">Current finalized committee operator detail is unavailable from the backend. Check the finalized committee checkpoint and lightserver verbose committee view.</div>";
     }
     body << "</div>";
     body << "<div class=\"card\"><h2>Availability Enforcement</h2><div class=\"note\">Finalized-history-derived BPoAR eligibility now gates future committee checkpoints. When eligible operator count is below the configured minimum, the node reports that fallback explicitly.</div>"
+         << "<div class=\"summary-actions\">" << fallback_chip(*status.value) << " " << operator_chip(*status.value) << "</div>"
          << "<div class=\"grid\" style=\"margin-top:14px;\">"
          << "<div>Epoch</div><div>" << (status.value->availability_epoch.has_value() ? std::to_string(*status.value->availability_epoch) : std::string("n/a")) << "</div>"
          << "<div>Retained Prefixes</div><div>" << (status.value->availability_retained_prefix_count.has_value() ? std::to_string(*status.value->availability_retained_prefix_count) : std::string("n/a")) << "</div>"
          << "<div>Tracked Operators</div><div>" << (status.value->availability_tracked_operator_count.has_value() ? std::to_string(*status.value->availability_tracked_operator_count) : std::string("n/a")) << "</div>"
          << "<div>Eligible Operators</div><div>" << (status.value->availability_eligible_operator_count.has_value() ? std::to_string(*status.value->availability_eligible_operator_count) : std::string("n/a")) << "</div>"
          << "<div>Below Min Eligible</div><div>" << (status.value->availability_below_min_eligible.has_value() ? yes_no(*status.value->availability_below_min_eligible) : std::string("n/a")) << "</div>"
-         << "<div>Checkpoint Mode</div><div>" << html_escape(status.value->availability_checkpoint_derivation_mode.value_or("n/a")) << "</div>"
-         << "<div>Checkpoint Fallback Reason</div><div>" << html_escape(status.value->availability_checkpoint_fallback_reason.value_or("n/a")) << "</div>"
-         << "<div>Sticky Fallback</div><div>"
-         << (status.value->availability_fallback_sticky.has_value() ? yes_no(*status.value->availability_fallback_sticky)
-                                                                   : std::string("n/a"))
-         << "</div>"
          << "<div>Qualified Operator Depth</div><div>"
          << (status.value->qualified_depth.has_value() ? std::to_string(*status.value->qualified_depth) : std::string("n/a"))
          << "</div>"
@@ -994,7 +1175,14 @@ std::string render_root(const Config& cfg) {
     } else {
       body << "n/a";
     }
-    body << "</div><div>Sticky Fallback Rate</div><div>";
+    body << "</div></div><details class=\"disclosure\"><summary>Show protocol internals</summary><div class=\"grid\">";
+    body << "<div>Checkpoint Mode</div><div>" << html_escape(status.value->availability_checkpoint_derivation_mode.value_or("n/a")) << "</div>"
+         << "<div>Checkpoint Fallback Reason</div><div>" << html_escape(status.value->availability_checkpoint_fallback_reason.value_or("n/a")) << "</div>"
+         << "<div>Sticky Fallback</div><div>"
+         << (status.value->availability_fallback_sticky.has_value() ? yes_no(*status.value->availability_fallback_sticky)
+                                                                   : std::string("n/a"))
+         << "</div>"
+         << "<div>Sticky Fallback Rate</div><div>";
     if (status.value->adaptive_sticky_fallback_rate_bps.has_value()) {
       body << html_escape(
           format_bonus_percent(static_cast<std::uint32_t>(*status.value->adaptive_sticky_fallback_rate_bps)));
@@ -1045,13 +1233,13 @@ std::string render_root(const Config& cfg) {
     } else {
       body << "n/a";
     }
-    body << "</div></div></div>";
+    body << "</div></div></details></div>";
   }
   const auto recent = fetch_recent_tx_results(cfg, 8);
   body << "<div class=\"card\"><h2>Finalized Transactions</h2>";
   if (!recent.empty()) {
     body << "<div class=\"note\">Recent finalized on-chain activity from the latest finalized transitions. Flow labels are explorer heuristics derived from finalized inputs and outputs, not wallet ownership proofs.</div>";
-    body << "<div class=\"table-wrap\"><table><thead><tr><th>Txid</th><th>Height</th><th>When</th><th>Flow</th><th>From</th><th>To</th><th>Total Out</th><th>Fee</th><th>Status</th><th>Shape</th></tr></thead><tbody>";
+    body << "<div class=\"table-wrap\"><table><thead><tr><th>Txid</th><th>Height</th><th>When</th><th>Flow</th><th>From</th><th>To</th><th>Finalized Out</th><th>Fee</th><th>Status</th><th>Shape</th></tr></thead><tbody>";
     for (const auto& item : recent) {
       body << "<tr><td>" << link_tx(item.txid) << "</td><td>"
            << (item.height.has_value() ? link_transition_height(*item.height) : std::string("<span class=\"muted\">n/a</span>"))
@@ -1091,7 +1279,7 @@ std::string render_root(const Config& cfg) {
     }
     body << "</tbody></table></div>";
   } else {
-    body << "<div class=\"note\">No recent finalized transactions available from the current backend view.</div>";
+    body << "<div class=\"soft-empty\">No finalized transactions were found in the recent finalized-height scan window. This usually means the latest finalized transitions carried no user transactions, not that explorer indexing is broken.</div>";
   }
   body << "</div>";
   body << "<div class=\"card\"><h2>Routes</h2><ul>"
@@ -1100,7 +1288,7 @@ std::string render_root(const Config& cfg) {
        << "<li><code>/address/&lt;address&gt;</code></li>"
        << "<li><code>/committee</code></li>"
        << "</ul></div>";
-  return page_layout("Finalis Explorer", body.str());
+  return page_layout("Finalis Explorer", body.str(), "overview");
 }
 
 std::string render_committee(const Config& cfg) {
@@ -1110,14 +1298,21 @@ std::string render_committee(const Config& cfg) {
   if (!status.value.has_value()) {
     body << "<div class=\"card\"><div class=\"note\">Status unavailable: "
          << html_escape(status.error ? status.error->message : "unknown error") << "</div></div>";
-    return page_layout("Committee", body.str());
+    return page_layout("Committee", body.str(), "committee");
   }
   auto committee = fetch_committee_result(cfg, status.value->finalized_height);
   if (!committee.value.has_value()) {
     body << "<div class=\"card\"><div class=\"note\">Committee unavailable: "
          << html_escape(committee.error ? committee.error->message : "unknown error") << "</div></div>";
-    return page_layout("Committee", body.str());
+    return page_layout("Committee", body.str(), "committee");
   }
+  body << "<div class=\"card\"><div class=\"hero-metrics\">"
+       << render_summary_metric_card("Committee Size", std::to_string(committee.value->members.size()), "finalized operator set")
+       << render_summary_metric_card("Quorum", std::to_string(status.value->latest_finality_quorum_threshold), "votes required for finality")
+       << render_summary_metric_card("Epoch Start", std::to_string(committee.value->epoch_start_height), "current finalized committee epoch")
+       << render_summary_metric_card("Checkpoint Mode", committee.value->checkpoint_derivation_mode.value_or("n/a"),
+                                     committee.value->checkpoint_fallback_reason.value_or("no fallback"))
+       << "</div></div>";
   body << "<div class=\"card\"><h2>" << html_escape(ticket_pow_title(*status.value)) << "</h2><div class=\"grid\">"
        << "<div>Difficulty</div><div>" << status.value->ticket_pow_difficulty << " <span class=\"muted\">(range "
        << status.value->ticket_pow_difficulty_min << "&ndash;" << status.value->ticket_pow_difficulty_max << ")</span></div>"
@@ -1202,7 +1397,7 @@ std::string render_committee(const Config& cfg) {
     body << "<tr><td colspan=\"9\" class=\"muted\">No finalized committee members available.</td></tr>";
   }
   body << "</tbody></table></div></div>";
-  return page_layout("Committee", body.str());
+  return page_layout("Committee", body.str(), "committee");
 }
 
 std::optional<finalis::FrontierTransition> fetch_transition_by_height(const Config& cfg, std::uint64_t height,
@@ -1523,7 +1718,7 @@ LookupResult<TxResult> fetch_tx_result(const Config& cfg, const std::string& txi
   std::uint64_t total_in = 0;
   bool fee_known = true;
   for (const auto& in : tx->inputs) {
-    TxInputResult input_view{finalis::hex_encode32(in.prev_txid), in.prev_index, std::nullopt};
+    TxInputResult input_view{finalis::hex_encode32(in.prev_txid), in.prev_index, std::nullopt, std::nullopt};
     auto prev_call = rpc_call(cfg.rpc_url, "get_tx", std::string("{\"txid\":\"") + finalis::hex_encode32(in.prev_txid) + "\"}");
     if (!prev_call.result.has_value() || !prev_call.result->is_object()) {
       result.inputs.push_back(std::move(input_view));
@@ -1545,6 +1740,7 @@ LookupResult<TxResult> fetch_tx_result(const Config& cfg, const std::string& txi
     }
     total_in += prev_tx->outputs[in.prev_index].value;
     input_view.address = script_to_address(prev_tx->outputs[in.prev_index].script_pubkey, hrp);
+    input_view.amount = prev_tx->outputs[in.prev_index].value;
     result.inputs.push_back(std::move(input_view));
   }
 
@@ -1610,7 +1806,14 @@ LookupResult<AddressResult> fetch_address_result(const Config& cfg, const std::s
       auto txid = object_string(&item, "txid");
       auto height = object_u64(&item, "height");
       if (!txid || !height) continue;
-      result.history.items.push_back(AddressHistoryItemResult{*txid, *height});
+      auto tx_lookup = fetch_tx_result(cfg, *txid);
+      if (tx_lookup.value.has_value()) {
+        auto history_item = classify_address_history_item(addr, *tx_lookup.value);
+        history_item.height = *height;
+        result.history.items.push_back(std::move(history_item));
+      } else {
+        result.history.items.push_back(AddressHistoryItemResult{*txid, *height, "related", 0, "Explorer could not expand the finalized transaction details"});
+      }
     }
     result.history.has_more = object_bool(&*res.result, "has_more").value_or(false);
     result.history.loaded_pages = static_cast<std::size_t>(page + 1);
@@ -1888,18 +2091,31 @@ std::string render_tx_json(const TxResult& result) {
         << json_escape(result.outputs[i].script_hex) << "\"}";
   }
   std::size_t decoded_output_count = 0;
+  std::set<std::string> decoded_recipients;
   for (const auto& output : result.outputs) {
-    if (output.address.has_value()) ++decoded_output_count;
+    if (output.address.has_value()) {
+      ++decoded_output_count;
+      decoded_recipients.insert(*output.address);
+    }
   }
-  oss << "],\"total_out\":" << result.total_out << ",\"fee\":"
+  oss << "],\"finalized_out\":" << result.total_out << ",\"total_out\":" << result.total_out << ",\"fee\":"
       << (result.fee.has_value() ? std::to_string(*result.fee) : "null") << ","
       << "\"input_count\":" << result.inputs.size() << ",\"output_count\":" << result.outputs.size()
-      << ",\"decoded_output_count\":" << decoded_output_count << ","
+      << ",\"decoded_output_count\":" << decoded_output_count
+      << ",\"flow\":{\"kind\":\"" << json_escape(result.flow_kind) << "\",\"summary\":\"" << json_escape(result.flow_summary) << "\"}"
+      << ",\"primary_sender\":" << json_string_or_null(result.primary_sender)
+      << ",\"primary_recipient\":" << json_string_or_null(result.primary_recipient)
+      << ",\"recipient_count\":" << decoded_recipients.size()
+      << ",\"participant_count\":";
+  if (result.participant_count.has_value()) oss << *result.participant_count;
+  else oss << "null";
+  oss << ","
       << "\"finalized_only\":true}";
   return oss.str();
 }
 
-std::string render_transition_json(const TransitionResult& result) {
+std::string render_transition_json(const Config& cfg, const TransitionResult& result) {
+  const auto summary = compute_transition_summary(cfg, result);
   std::ostringstream oss;
   oss << "{\"found\":" << json_bool(result.found) << ",\"finalized\":true,"
       << "\"height\":" << result.height << ",\"hash\":\"" << json_escape(result.hash) << "\","
@@ -1910,17 +2126,42 @@ std::string render_transition_json(const TransitionResult& result) {
     if (i) oss << ",";
     oss << "\"" << json_escape(result.txids[i]) << "\"";
   }
-  oss << "],\"finalized_only\":true,\"snapshot_kind\":\"finalized_transition\"}";
+  oss << "],\"summary\":{\"tx_count\":" << result.tx_count
+      << ",\"finalized_out\":" << summary.finalized_out
+      << ",\"distinct_recipient_count\":" << summary.distinct_recipient_count
+      << ",\"flow_mix\":{";
+  bool first_flow = true;
+  for (const auto& [kind, count] : summary.flow_mix) {
+    if (!first_flow) oss << ",";
+    first_flow = false;
+    oss << "\"" << json_escape(kind) << "\":" << count;
+  }
+  oss << "}},\"finalized_only\":true,\"snapshot_kind\":\"finalized_transition\"}";
   return oss.str();
 }
 
 std::string render_address_json(const AddressResult& result) {
   std::ostringstream oss;
   std::uint64_t finalized_balance = 0;
+  std::uint64_t received_total = 0;
+  std::uint64_t sent_total = 0;
+  std::uint64_t self_transfer_total = 0;
   for (const auto& utxo : result.utxos) finalized_balance += utxo.amount;
+  for (const auto& item : result.history.items) {
+    if (item.net_amount > 0 && item.direction == "received") received_total += static_cast<std::uint64_t>(item.net_amount);
+    else if (item.net_amount < 0 && item.direction == "sent") sent_total += static_cast<std::uint64_t>(-item.net_amount);
+    else if (item.direction == "self-transfer") {
+      self_transfer_total += static_cast<std::uint64_t>(item.net_amount >= 0 ? item.net_amount : -item.net_amount);
+    }
+  }
   oss << "{\"address\":\"" << json_escape(result.address) << "\","
       << "\"found\":" << json_bool(result.found) << ",\"finalized_balance\":" << finalized_balance
-      << ",\"history_slice_complete\":" << json_bool(!result.history.has_more) << ",\"utxos\":[";
+      << ",\"history_slice_complete\":" << json_bool(!result.history.has_more)
+      << ",\"summary\":{\"finalized_balance\":" << finalized_balance
+      << ",\"received\":" << received_total
+      << ",\"sent\":" << sent_total
+      << ",\"self_transfer\":" << self_transfer_total
+      << "},\"utxos\":[";
   for (std::size_t i = 0; i < result.utxos.size(); ++i) {
     if (i) oss << ",";
     oss << "{\"txid\":\"" << json_escape(result.utxos[i].txid) << "\",\"vout\":" << result.utxos[i].vout
@@ -1930,7 +2171,9 @@ std::string render_address_json(const AddressResult& result) {
   for (std::size_t i = 0; i < result.history.items.size(); ++i) {
     if (i) oss << ",";
     oss << "{\"txid\":\"" << json_escape(result.history.items[i].txid) << "\",\"height\":"
-        << result.history.items[i].height << "}";
+        << result.history.items[i].height << ",\"direction\":\"" << json_escape(result.history.items[i].direction)
+        << "\",\"net_amount\":" << result.history.items[i].net_amount
+        << ",\"detail\":\"" << json_escape(result.history.items[i].detail) << "\"}";
   }
   oss << "],\"has_more\":" << json_bool(result.history.has_more) << ",\"next_cursor\":"
       << json_string_or_null(result.history.next_cursor)
@@ -1990,13 +2233,16 @@ std::string render_committee_json(const CommitteeResult& result) {
 
 std::string render_recent_tx_json(const std::vector<RecentTxResult>& items) {
   std::ostringstream oss;
+  std::uint64_t finalized_out_total = 0;
   oss << "{\"items\":[";
   for (std::size_t i = 0; i < items.size(); ++i) {
     if (i) oss << ",";
     const auto& item = items[i];
+    if (item.total_out.has_value()) finalized_out_total += *item.total_out;
     oss << "{\"txid\":\"" << json_escape(item.txid) << "\""
         << ",\"height\":" << json_u64_or_null(item.height)
         << ",\"timestamp\":" << json_u64_or_null(item.timestamp)
+        << ",\"finalized_out\":" << json_u64_or_null(item.total_out)
         << ",\"total_out\":" << json_u64_or_null(item.total_out)
         << ",\"fee\":" << json_u64_or_null(item.fee)
         << ",\"status_label\":" << json_string_or_null(item.status_label)
@@ -2018,7 +2264,8 @@ std::string render_recent_tx_json(const std::vector<RecentTxResult>& items) {
     else oss << "null";
     oss << "}";
   }
-  oss << "],\"finalized_only\":true,\"snapshot_kind\":\"recent_finalized_transactions\"}";
+  oss << "],\"summary\":{\"tx_count\":" << items.size() << ",\"finalized_out\":" << finalized_out_total
+      << "},\"finalized_only\":true,\"snapshot_kind\":\"recent_finalized_transactions\"}";
   return oss.str();
 }
 
@@ -2039,11 +2286,28 @@ std::string render_tx(const Config& cfg, const std::string& txid_hex) {
   if (!lookup.value.has_value()) {
     body << "<div class=\"card\"><div class=\"note\">Lookup failed: "
          << html_escape(lookup.error ? lookup.error->message : "unknown error") << "</div></div>";
-    return page_layout("Transaction", body.str());
+    return page_layout("Transaction", body.str(), "tx");
   }
   const auto& tx = *lookup.value;
   const std::string tx_path = "/tx/" + tx.txid;
   const std::string tx_api_path = "/api/tx/" + tx.txid;
+  const std::string payer = tx.primary_sender.has_value() ? short_hex(*tx.primary_sender) : std::string("unknown");
+  std::string payee = tx.primary_recipient.has_value() ? short_hex(*tx.primary_recipient) : std::string("unknown");
+  if (!tx.outputs.empty() && tx.outputs.size() > 1) {
+    std::size_t decoded_recipient_count = 0;
+    for (const auto& out : tx.outputs) {
+      if (out.address.has_value()) ++decoded_recipient_count;
+    }
+    if (decoded_recipient_count > 1) payee += " +" + std::to_string(decoded_recipient_count - 1) + " more";
+  }
+
+  body << "<div class=\"card\"><div class=\"hero-metrics\">"
+       << render_summary_metric_card("Flow", tx.flow_kind, tx.flow_summary)
+       << render_summary_metric_card("Paid By", payer, "inferred from finalized inputs")
+       << render_summary_metric_card("Paid To", payee, "inferred from finalized outputs")
+       << render_summary_metric_card("Finalized Out", format_amount(tx.total_out),
+                                     tx.fee.has_value() ? ("fee " + format_amount(*tx.fee)) : "fee unknown")
+       << "</div></div>";
 
   body << "<div class=\"card\"><div class=\"status-hero\">"
        << "<div>" << mono_value(tx.txid) << "</div><div>" << finalized_badge(tx.finalized) << " "
@@ -2068,7 +2332,7 @@ std::string render_tx(const Config& cfg, const std::string& txid_hex) {
   body << "<div>Input Count</div><div>" << tx.inputs.size() << "</div>";
   body << "<div>Output Count</div><div>" << tx.outputs.size() << "</div>";
   if (tx.fee.has_value()) body << "<div>Fee</div><div>" << html_escape(format_amount(*tx.fee)) << "</div>";
-  body << "<div>Total Out</div><div>" << html_escape(format_amount(tx.total_out)) << "</div>"
+  body << "<div>Finalized Out</div><div>" << html_escape(format_amount(tx.total_out)) << "</div>"
        << "</div><div class=\"summary-actions\">"
        << copy_action("Copy Txid", tx.txid)
        << copy_action("Copy Page Path", tx_path)
@@ -2076,13 +2340,19 @@ std::string render_tx(const Config& cfg, const std::string& txid_hex) {
   if (!tx.transition_hash.empty()) body << copy_action("Copy Transition Hash", tx.transition_hash);
   body << "</div></div>";
 
-  body << "<div class=\"card\"><h2>Inputs</h2><div class=\"table-wrap\"><table><thead><tr><th>#</th><th>Prev Tx</th><th>Vout</th></tr></thead><tbody>";
+  body << "<div class=\"card\"><h2>Inputs</h2><div class=\"table-wrap\"><table><thead><tr><th>#</th><th>Prev Tx</th><th>Vout</th><th>Decoded Source</th><th>Amount</th></tr></thead><tbody>";
   for (std::size_t i = 0; i < tx.inputs.size(); ++i) {
     const auto& in = tx.inputs[i];
     body << "<tr><td>" << i << "</td><td>" << link_tx(in.prev_txid) << "</td><td>" << in.vout
-         << "</td></tr>";
+         << "</td><td>";
+    if (in.address.has_value()) body << "<a href=\"/address/" << html_escape(*in.address) << "\"><code>" << html_escape(*in.address) << "</code></a>";
+    else body << "<span class=\"muted\">not decoded by explorer</span>";
+    body << "</td><td>";
+    if (in.amount.has_value()) body << html_escape(format_amount(*in.amount));
+    else body << "<span class=\"muted\">n/a</span>";
+    body << "</td></tr>";
   }
-  if (tx.inputs.empty()) body << "<tr><td colspan=\"3\" class=\"muted\">No inputs</td></tr>";
+  if (tx.inputs.empty()) body << "<tr><td colspan=\"5\" class=\"muted\">No inputs</td></tr>";
   body << "</tbody></table></div></div>";
 
   body << "<div class=\"card\"><h2>Outputs</h2><div class=\"table-wrap\"><table><thead><tr><th>#</th><th>Amount</th><th>Decoded Destination</th><th>Output Form</th><th>Script</th></tr></thead><tbody>";
@@ -2097,7 +2367,7 @@ std::string render_tx(const Config& cfg, const std::string& txid_hex) {
   if (tx.outputs.empty()) body << "<tr><td colspan=\"5\" class=\"muted\">No outputs</td></tr>";
   body << "</tbody></table></div></div>";
 
-  return page_layout("Transaction " + txid_hex, body.str());
+  return page_layout("Transaction " + txid_hex, body.str(), "tx");
 }
 
 std::string render_transition(const Config& cfg, const std::string& ident) {
@@ -2107,11 +2377,41 @@ std::string render_transition(const Config& cfg, const std::string& ident) {
   if (!lookup.value.has_value()) {
     body << "<div class=\"card\"><div class=\"note\">Lookup failed: "
          << html_escape(lookup.error ? lookup.error->message : "unknown error") << "</div></div>";
-    return page_layout("Transition", body.str());
+    return page_layout("Transition", body.str(), "transition");
   }
   const auto& transition = *lookup.value;
   const std::string transition_path = "/transition/" + transition.hash;
   const std::string transition_api_path = "/api/transition/" + transition.hash;
+  std::uint64_t total_finalized_out = 0;
+  std::set<std::string> distinct_recipients;
+  std::map<std::string, std::size_t> flow_mix;
+  for (const auto& txid : transition.txids) {
+    auto tx_lookup = fetch_tx_result(cfg, txid);
+    if (!tx_lookup.value.has_value()) continue;
+    total_finalized_out += tx_lookup.value->total_out;
+    ++flow_mix[tx_lookup.value->flow_kind];
+    for (const auto& out : tx_lookup.value->outputs) {
+      if (out.address.has_value() && !out.address->empty()) distinct_recipients.insert(*out.address);
+    }
+  }
+  std::ostringstream flow_mix_text;
+  if (flow_mix.empty()) {
+    flow_mix_text << "no classified finalized txs";
+  } else {
+    bool first = true;
+    for (const auto& [kind, count] : flow_mix) {
+      if (!first) flow_mix_text << ", ";
+      first = false;
+      flow_mix_text << kind << "=" << count;
+    }
+  }
+
+  body << "<div class=\"card\"><div class=\"hero-metrics\">"
+       << render_summary_metric_card("Tx Count", std::to_string(transition.txids.size()), "finalized txids in this transition")
+       << render_summary_metric_card("Total Finalized Out", format_amount(total_finalized_out), "sum of finalized outputs in this transition")
+       << render_summary_metric_card("Distinct Recipients", std::to_string(distinct_recipients.size()), "decoded finalized output addresses")
+       << render_summary_metric_card("Activity Mix", flow_mix_text.str(), "flow-type counts inferred from finalized tx structure")
+       << "</div></div>";
 
   body << "<div class=\"card\"><div class=\"status-hero\">"
        << "<div>" << mono_value(transition.hash) << "</div><div>" << finalized_badge(true) << "</div></div>"
@@ -2122,7 +2422,7 @@ std::string render_transition(const Config& cfg, const std::string& ident) {
        << "<div>Prev Finalized Hash</div><div class=\"value-cell\">" << mono_value(transition.prev_finalized_hash)
        << "</div>"
        << "<div>Timestamp</div><div>"
-       << html_escape(transition.timestamp.has_value() ? format_timestamp(*transition.timestamp) : std::string("n/a")) << "</div>"
+       << html_escape(transition.timestamp.has_value() ? format_timestamp(*transition.timestamp) : std::string("not carried in finalized transition record")) << "</div>"
        << "<div>Round</div><div>" << transition.round << "</div>"
        << "<div>Tx Count</div><div>" << transition.tx_count << "</div></div>"
        << "<div class=\"summary-actions\">"
@@ -2135,9 +2435,9 @@ std::string render_transition(const Config& cfg, const std::string& ident) {
   for (std::size_t i = 0; i < transition.txids.size(); ++i) {
     body << "<tr><td>" << i << "</td><td>" << link_tx(transition.txids[i]) << "</td><td class=\"muted\">see tx page</td></tr>";
   }
-  if (transition.txids.empty()) body << "<tr><td colspan=\"3\" class=\"muted\">No transactions</td></tr>";
+  if (transition.txids.empty()) body << "<tr><td colspan=\"3\" class=\"muted\">No transactions were finalized in this transition.</td></tr>";
   body << "</tbody></table></div></div>";
-  return page_layout("Transition " + transition.hash, body.str());
+  return page_layout("Transition " + transition.hash, body.str(), "transition");
 }
 
 std::string render_address(const Config& cfg, const std::string& addr, const std::map<std::string, std::string>& query) {
@@ -2158,13 +2458,31 @@ std::string render_address(const Config& cfg, const std::string& addr, const std
   if (!lookup.value.has_value()) {
     body << "<div class=\"card\"><div class=\"note\">Lookup failed: "
          << html_escape(lookup.error ? lookup.error->message : "unknown error") << "</div></div>";
-    return page_layout("Address", body.str());
+    return page_layout("Address", body.str(), "address");
   }
   const auto& address = *lookup.value;
   const std::string address_path = "/address/" + addr;
   const std::string address_api_path = "/api/address/" + addr;
   std::uint64_t finalized_balance = 0;
   for (const auto& u : address.utxos) finalized_balance += u.amount;
+  std::uint64_t received_total = 0;
+  std::uint64_t sent_total = 0;
+  std::uint64_t self_transfer_total = 0;
+  for (const auto& item : address.history.items) {
+    if (item.net_amount > 0 && item.direction == "received") received_total += static_cast<std::uint64_t>(item.net_amount);
+    else if (item.net_amount < 0 && item.direction == "sent") sent_total += static_cast<std::uint64_t>(-item.net_amount);
+    else if (item.direction == "self-transfer") {
+      self_transfer_total += static_cast<std::uint64_t>(item.net_amount >= 0 ? item.net_amount : -item.net_amount);
+    }
+  }
+
+  body << "<div class=\"card\"><div class=\"hero-metrics\">"
+       << render_summary_metric_card("Finalized Balance", format_amount(finalized_balance), "current spendable UTXO set")
+       << render_summary_metric_card("Received (Visible Slice)", format_amount(received_total), "credits in the current history view")
+       << render_summary_metric_card("Sent (Visible Slice)", format_amount(sent_total), "debits in the current history view")
+       << render_summary_metric_card("Self-Transfer (Visible Slice)", format_amount(self_transfer_total),
+                                     "value recycled back to the same address in this view")
+       << "</div></div>";
   body << "<div class=\"card\"><div class=\"status-hero\">"
        << "<div>" << mono_value(addr) << "</div><div>" << finalized_badge(true) << "</div></div>"
        << "<div class=\"note\">Address view is finalized-state only. It shows current finalized UTXOs plus a paginated finalized-history slice, not live mempool activity.</div>"
@@ -2197,14 +2515,17 @@ std::string render_address(const Config& cfg, const std::string& addr, const std
   }
   body << "</tbody></table></div></div>";
 
-  body << "<div class=\"card\"><h2>Finalized History</h2><div class=\"table-wrap\"><table><thead><tr><th>#</th><th>Txid</th><th>Height</th></tr></thead><tbody>";
+  body << "<div class=\"card\"><h2>Finalized History</h2><div class=\"note\">Each row is interpreted relative to this address only, using finalized inputs and outputs.</div><div class=\"table-wrap\"><table><thead><tr><th>#</th><th>Txid</th><th>Height</th><th>Direction</th><th>Net Amount</th><th>Detail</th></tr></thead><tbody>";
   if (!address.history.items.empty()) {
     for (std::size_t i = 0; i < address.history.items.size(); ++i) {
       const auto& item = address.history.items[i];
-      body << "<tr><td>" << i << "</td><td>" << link_tx(item.txid) << "</td><td>" << link_transition_height(item.height) << "</td></tr>";
+      const char* amount_class = item.net_amount > 0 ? "amount-in" : (item.net_amount < 0 ? "amount-out" : "muted");
+      body << "<tr><td>" << i << "</td><td>" << link_tx(item.txid) << "</td><td>" << link_transition_height(item.height)
+           << "</td><td><strong>" << html_escape(item.direction) << "</strong></td><td class=\"" << amount_class << "\">"
+           << html_escape(format_signed_amount(item.net_amount)) << "</td><td>" << html_escape(item.detail) << "</td></tr>";
     }
   } else {
-    body << "<tr><td colspan=\"3\" class=\"muted\">No finalized history found.</td></tr>";
+    body << "<tr><td colspan=\"6\" class=\"muted\">No finalized history found.</td></tr>";
   }
   body << "</tbody></table></div></div>";
   if (address.history.has_more) {
@@ -2222,7 +2543,7 @@ std::string render_address(const Config& cfg, const std::string& addr, const std
     body << "</div>";
   }
 
-  return page_layout("Address " + addr, body.str());
+  return page_layout("Address " + addr, body.str(), "address");
 }
 
 bool write_all(int fd, const std::string& data) {
@@ -2379,7 +2700,7 @@ Response handle_request(const Config& cfg, const std::string& req) {
   }
   if (path.rfind(api_transition_prefix, 0) == 0) {
     auto result = fetch_transition_result(cfg, path.substr(api_transition_prefix.size()));
-    return result.value.has_value() ? json_response(200, render_transition_json(*result.value))
+    return result.value.has_value() ? json_response(200, render_transition_json(cfg, *result.value))
                                     : json_error_response(*result.error);
   }
   if (path.rfind(api_address_prefix, 0) == 0) {

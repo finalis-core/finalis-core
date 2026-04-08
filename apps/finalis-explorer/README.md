@@ -24,6 +24,7 @@ Supported API routes:
 - `/healthz`
 - `/api/status`
 - `/api/committee`
+- `/api/recent-tx`
 - `/api/tx/<txid>`
 - `/api/transition/<height_or_hash>`
 - `/api/address/<address>`
@@ -34,10 +35,25 @@ What it shows:
 - current bounded Ticket PoW difficulty, clamp, epoch health, and streaks
 - current finalized committee operator view with representative pubkey, base
   weight, ticket bonus, and final weight
-- transaction finalized status, credit-safe status, transition linkage, timestamp
-  when available, inputs, and outputs
-- transition height, hash, previous finalized hash, timestamp, and tx list
-- address finalized UTXOs and finalized history
+- page-level summaries for operator-facing views:
+  - homepage recent activity summary
+  - committee summary cards
+  - transaction payment summary
+  - transition summary cards
+  - address visible-slice summary
+- transaction finalized status, credit-safe status, transition linkage,
+  finalized flow classification, inferred payer/payee summary, timestamp when
+  available, inputs, and outputs
+- transition height, hash, previous finalized hash, timestamp, tx list, and a
+  finalized summary layer:
+  - tx count
+  - finalized out
+  - distinct recipients
+  - flow mix
+- address finalized UTXOs and finalized history with address-relative direction:
+  - received
+  - sent
+  - self-transfer
 - recent finalized transaction activity on the homepage
 - copyable page/API paths for operator and support workflows
 - stable finalized-only JSON for exchange, wallet, and mobile consumers
@@ -75,6 +91,18 @@ Transaction status semantics:
   - relay admission only
   - not inclusion
   - not finality
+- `flow`
+  - explorer-side interpretation of finalized tx structure
+  - not wallet ownership proof
+- `finalized_out`
+  - sum of finalized outputs in a finalized transaction or aggregate view
+  - explorer keeps legacy `total_out` aliases where needed for compatibility
+- `recipient_count`
+  - count of decoded finalized output recipients
+- `net_amount`
+  - signed address-relative amount in address history
+  - positive means net received in the finalized transaction
+  - negative means net sent in the finalized transaction
 - `finalized`
   - present in finalized state
 - `finalized_only`
@@ -140,9 +168,22 @@ Address behavior:
   - empty `history.items`
   - `has_more: false`
   - `next_cursor: null`
+- address history items are address-relative and expose:
+  - `direction`
+  - `net_amount`
+  - `detail`
+- address responses also expose a visible-slice `summary`:
+  - `finalized_balance`
+  - `received`
+  - `sent`
+  - `self_transfer`
 - `history.has_more` indicates whether another finalized history page exists
 - `history.next_cursor` is only non-null when another page exists
 - if `history.has_more` is `false`, `history.next_cursor` is always `null`
+- `history.next_page_path` is a user-facing explorer path for older finalized
+  history
+- `history.loaded_pages` reports how many backend history pages were merged into
+  the visible slice
 
 API contract is intended to be stable for exchange, wallet, mobile, and
 operator consumers.
@@ -199,6 +240,25 @@ Stable finalized surfaces:
 - `/api/tx/<txid>`
   - finalized-only transaction status
   - returns `404` if the tx is not finalized in explorer state
+- `/api/transition/<height_or_hash>`
+  - finalized transition plus `summary`:
+    - `tx_count`
+    - `finalized_out`
+    - `distinct_recipient_count`
+    - `flow_mix`
+- `/api/address/<address>`
+  - finalized-only address view
+  - includes `summary` and address-relative history
+- `/api/recent-tx`
+  - recent finalized activity
+  - includes top-level `summary`
+  - recent items include:
+    - `finalized_out`
+    - `fee`
+    - `flow_kind`
+    - `flow_summary`
+    - `primary_sender`
+    - `primary_recipient`
 
 Related lightserver note:
 
@@ -262,6 +322,83 @@ Version note:
       "ticket_nonce": 12
     }
   ],
+  "finalized_only": true
+}
+```
+
+`GET /api/tx/<txid>`
+
+```json
+{
+  "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "finalized": true,
+  "finalized_height": 608,
+  "credit_safe": true,
+  "status_label": "FINALIZED (CREDIT SAFE)",
+  "transition_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "finalized_out": 41000000000,
+  "total_out": 41000000000,
+  "fee": 1000,
+  "flow": {
+    "kind": "transfer-with-change",
+    "summary": "Likely payment with one external recipient and one change output"
+  },
+  "primary_sender": "sc1...",
+  "primary_recipient": "sc1...",
+  "recipient_count": 2,
+  "participant_count": 2,
+  "finalized_only": true
+}
+```
+
+`GET /api/transition/<height_or_hash>`
+
+```json
+{
+  "height": 608,
+  "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "tx_count": 3,
+  "summary": {
+    "tx_count": 3,
+    "finalized_out": 74135649710,
+    "distinct_recipient_count": 2,
+    "flow_mix": {
+      "transfer-with-change": 2,
+      "issuance": 1
+    }
+  },
+  "finalized_only": true
+}
+```
+
+`GET /api/address/<address>`
+
+```json
+{
+  "address": "sc1...",
+  "found": true,
+  "finalized_balance": 74135649710,
+  "summary": {
+    "finalized_balance": 74135649710,
+    "received": 74135649710,
+    "sent": 0,
+    "self_transfer": 0
+  },
+  "history": {
+    "items": [
+      {
+        "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "height": 608,
+        "direction": "received",
+        "net_amount": 74135649710,
+        "detail": "Finalized credit to this address"
+      }
+    ],
+    "has_more": false,
+    "next_cursor": null,
+    "next_page_path": null,
+    "loaded_pages": 1
+  },
   "finalized_only": true
 }
 ```
