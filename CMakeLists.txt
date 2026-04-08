@@ -15,6 +15,7 @@ option(FINALIS_STRICT_WARNINGS "Enable strict warning flags" OFF)
 
 find_package(OpenSSL REQUIRED)
 find_package(Qt5 COMPONENTS Widgets QUIET)
+find_package(ZLIB QUIET)
 
 # Optional libs: RocksDB and libsodium. Build falls back gracefully if unavailable.
 find_library(SODIUM_LIB sodium)
@@ -89,6 +90,12 @@ endif()
 if(ROCKSDB_LIB AND ROCKSDB_INCLUDE_DIR)
   target_include_directories(finalis_core PUBLIC ${ROCKSDB_INCLUDE_DIR})
   target_link_libraries(finalis_core PUBLIC ${ROCKSDB_LIB})
+endif()
+if(ZLIB_FOUND)
+  target_link_libraries(finalis_core PUBLIC ZLIB::ZLIB)
+endif()
+if(WIN32)
+  target_link_libraries(finalis_core PUBLIC ws2_32 rpcrt4 shlwapi)
 endif()
 
 if(FINALIS_STRICT_WARNINGS)
