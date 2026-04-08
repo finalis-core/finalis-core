@@ -96,7 +96,7 @@ bool read_exact(net::SocketHandle fd, std::uint8_t* dst, std::size_t n) {
   (void)net::ensure_sockets();
   size_t off = 0;
   while (off < n) {
-    ssize_t k = ::recv(fd, dst + off, n - off, 0);
+    ssize_t k = ::recv(fd, reinterpret_cast<char*>(dst + off), static_cast<int>(n - off), 0);
     if (k <= 0) return false;
     off += static_cast<size_t>(k);
   }
@@ -111,7 +111,7 @@ bool write_all(net::SocketHandle fd, const std::uint8_t* src, std::size_t n) {
 #ifdef MSG_NOSIGNAL
     flags |= MSG_NOSIGNAL;
 #endif
-    ssize_t k = ::send(fd, src + off, n - off, flags);
+    ssize_t k = ::send(fd, reinterpret_cast<const char*>(src + off), static_cast<int>(n - off), flags);
     if (k <= 0) return false;
     off += static_cast<size_t>(k);
   }
@@ -146,7 +146,7 @@ bool read_exact_timed(net::SocketHandle fd, std::uint8_t* dst, std::size_t n, st
       if (bytes_read) *bytes_read = off;
       return false;
     }
-    const ssize_t k = ::recv(fd, dst + off, n - off, 0);
+    const ssize_t k = ::recv(fd, reinterpret_cast<char*>(dst + off), static_cast<int>(n - off), 0);
     if (k <= 0) {
       if (bytes_read) *bytes_read = off;
       if (eof && k == 0) *eof = true;
@@ -171,7 +171,7 @@ bool write_exact_timed(net::SocketHandle fd, const std::uint8_t* src, std::size_
 #ifdef MSG_NOSIGNAL
     flags |= MSG_NOSIGNAL;
 #endif
-    const ssize_t k = ::send(fd, src + off, n - off, flags);
+    const ssize_t k = ::send(fd, reinterpret_cast<const char*>(src + off), static_cast<int>(n - off), flags);
     if (k <= 0) return false;
     off += static_cast<std::size_t>(k);
   }
