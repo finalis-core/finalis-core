@@ -67,6 +67,7 @@ int main() {
   register_lightserver_tests();
 
   int failed = 0;
+  std::vector<std::string> failed_names;
   const char* filter = std::getenv("FINALIS_TEST_FILTER");
   std::vector<std::pair<std::string, TestFn>> selected;
   selected.reserve(tests().size());
@@ -89,10 +90,15 @@ int main() {
       std::cout << "[ok " << index << "/" << total << "] " << name << "\n";
     } catch (const std::exception& e) {
       ++failed;
+      failed_names.push_back(name);
       std::cout << "[fail " << index << "/" << total << "] " << name << ": " << e.what() << "\n";
     }
   }
   if (failed) {
+    std::cerr << "[failed-summary] count=" << failed << "\n";
+    for (const auto& name : failed_names) {
+      std::cerr << "[failed-summary] " << name << "\n";
+    }
     std::cerr << failed << " tests failed\n";
     return 1;
   }

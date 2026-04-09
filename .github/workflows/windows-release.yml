@@ -76,7 +76,23 @@ jobs:
 
       - name: Run core tests
         shell: pwsh
-        run: ctest --test-dir build/windows-release -C Release --output-on-failure -R "^finalis-tests$"
+        run: |
+          $logDir = "${{ github.workspace }}\dist\test-logs"
+          New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+          $logPath = Join-Path $logDir "finalis-tests.log"
+          $exe = "${{ github.workspace }}\build\windows-release\finalis-tests.exe"
+          & $exe 2>&1 | Tee-Object -FilePath $logPath
+          $exitCode = $LASTEXITCODE
+          Write-Host "== Failed test lines =="
+          Select-String -Path $logPath -Pattern '^\[fail ','^\[failed-summary\]' | ForEach-Object { $_.Line }
+          if ($exitCode -ne 0) { exit $exitCode }
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finalis-core-windows-test-logs-${{ steps.meta.outputs.version }}
+          path: dist/test-logs
 
       - name: Stage Windows payload
         shell: pwsh
