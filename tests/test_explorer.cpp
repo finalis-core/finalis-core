@@ -78,12 +78,16 @@ class ScopedRpcHook {
   using Handler = std::function<std::string(const std::string&)>;
 
   explicit ScopedRpcHook(Handler handler) : prev_(g_http_post_json_raw) {
+    clear_runtime_caches();
     g_http_post_json_raw = [handler = std::move(handler)](const std::string&, const std::string& body, std::string*) {
       return std::optional<std::string>(handler(body));
     };
   }
 
-  ~ScopedRpcHook() { g_http_post_json_raw = prev_; }
+  ~ScopedRpcHook() {
+    g_http_post_json_raw = prev_;
+    clear_runtime_caches();
+  }
 
  private:
   HttpPostJsonRawFn prev_;
@@ -95,12 +99,16 @@ class ScopedUtxoHook {
       std::function<std::optional<std::vector<finalis::lightserver::UtxoView>>(const Hash32&, std::string*)>;
 
   explicit ScopedUtxoHook(Handler handler) : prev_(g_rpc_get_utxos) {
+    clear_runtime_caches();
     g_rpc_get_utxos = [handler = std::move(handler)](const std::string&, const Hash32& scripthash, std::string* err) {
       return handler(scripthash, err);
     };
   }
 
-  ~ScopedUtxoHook() { g_rpc_get_utxos = prev_; }
+  ~ScopedUtxoHook() {
+    g_rpc_get_utxos = prev_;
+    clear_runtime_caches();
+  }
 
  private:
   RpcGetUtxosFn prev_;

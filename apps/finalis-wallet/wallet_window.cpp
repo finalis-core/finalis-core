@@ -192,9 +192,25 @@ QString inferred_validator_key_path_from_db(const QString& db_path) {
   return QFileInfo::exists(candidate) && QFileInfo(candidate).isFile() ? candidate : QString{};
 }
 
-QString default_mainnet_db_path() { return QDir::home().filePath(".finalis/mainnet"); }
+bool looks_like_node_validator_key(const QString& path) {
+  const QFileInfo info(path);
+  if (!info.exists() || !info.isFile()) return false;
+  return info.fileName() == "validator.json" && info.dir().dirName() == "keystore";
+}
 
-QString default_mainnet_validator_key_path() { return QDir::home().filePath(".finalis/mainnet/keystore/validator.json"); }
+QString default_finalis_root_path() {
+#ifdef Q_OS_WIN
+  const QString appdata = qEnvironmentVariable("APPDATA").trimmed();
+  if (!appdata.isEmpty()) return QDir(appdata).filePath(".finalis");
+#endif
+  return QDir::home().filePath(".finalis");
+}
+
+QString default_mainnet_db_path() { return QDir(default_finalis_root_path()).filePath("mainnet"); }
+
+QString default_mainnet_validator_key_path() {
+  return QDir(default_finalis_root_path()).filePath("mainnet/keystore/validator.json");
+}
 
 QString preferred_startup_wallet_path() {
   QSettings settings(kSettingsOrg, kSettingsApp);
@@ -1644,12 +1660,18 @@ void WalletWindow::refresh_validator_readiness_panel(bool interactive) {
       validator_db_path_edit_->setText(QString::fromStdString(*inferred));
     }
   }
-  if (validator_key_path_edit_ && validator_key_path_edit_->text().trimmed().isEmpty()) {
+  if (validator_key_path_edit_) {
+    const QString current_key = validator_key_path_edit_->text().trimmed();
     const QString inferred_key = inferred_validator_key_path_from_db(
         validator_db_path_edit_ ? validator_db_path_edit_->text().trimmed() : QString{});
-    if (!inferred_key.isEmpty()) {
+    const bool should_replace_with_inferred =
+        !inferred_key.isEmpty() &&
+        (current_key.isEmpty() ||
+         (wallet_ && current_key == QString::fromStdString(wallet_->file_path) && !looks_like_node_validator_key(current_key)));
+    if (should_replace_with_inferred) {
       validator_key_path_edit_->setText(inferred_key);
-    } else if (wallet_) {
+    } else if (current_key.isEmpty() && wallet_ &&
+               looks_like_node_validator_key(QString::fromStdString(wallet_->file_path))) {
       validator_key_path_edit_->setText(QString::fromStdString(wallet_->file_path));
     }
   }
@@ -3169,7 +3191,8 @@ void WalletWindow::create_wallet() {
   wallet_ = loaded;
   (void)open_wallet_store();
   load_wallet_local_state();
-  (void)refresh_finalized_send_state();
+  clear_lightserver_runtime_status();
+  utxos_.clear();
   update_wallet_views();
   append_local_event("Created wallet at " + path);
   refresh_chain_state(false);
@@ -3186,7 +3209,8 @@ void WalletWindow::open_wallet() {
   wallet_ = *loaded;
   (void)open_wallet_store();
   load_wallet_local_state();
-  (void)refresh_finalized_send_state();
+  clear_lightserver_runtime_status();
+  utxos_.clear();
   update_wallet_views();
   append_local_event("Opened wallet " + path);
   refresh_chain_state(false);
@@ -3226,7 +3250,8 @@ void WalletWindow::import_wallet() {
   wallet_ = loaded;
   (void)open_wallet_store();
   load_wallet_local_state();
-  (void)refresh_finalized_send_state();
+  clear_lightserver_runtime_status();
+  utxos_.clear();
   update_wallet_views();
   append_local_event("Imported wallet into " + path);
   refresh_chain_state(false);
@@ -3253,9 +3278,10 @@ void WalletWindow::export_wallet_secret() {
 
 void WalletWindow::save_connection_settings() {
   save_settings();
+  clear_lightserver_runtime_status();
+  utxos_.clear();
   update_connection_views();
   append_local_event("Saved local connection settings.");
-  (void)refresh_finalized_send_state();
   refresh_chain_state(false);
   statusBar()->showMessage("Settings saved.", 3000);
 }

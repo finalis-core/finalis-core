@@ -1,0 +1,182 @@
+name: windows-release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-installer:
+    runs-on: windows-latest
+    env:
+      BUILD_PRESET: windows-msvc-release
+      QT_VERSION: 5.15.2
+      QT_ARCH: win64_msvc2019_64
+      WINDOWS_SIGN_PFX_BASE64: ${{ secrets.WINDOWS_SIGN_PFX_BASE64 }}
+      WINDOWS_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGN_PFX_PASSWORD }}
+      WINDOWS_SIGN_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGN_TIMESTAMP_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC developer command prompt
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache vcpkg downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            vcpkg/downloads
+            vcpkg/packages
+            vcpkg/buildtrees
+            vcpkg/installed
+          key: ${{ runner.os }}-vcpkg-${{ hashFiles('vcpkg.json') }}
+
+      - name: Checkout vcpkg
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          path: vcpkg
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: .\vcpkg\bootstrap-vcpkg.bat
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: ${{ env.QT_ARCH }}
+          dir: ${{ github.workspace }}\.qt
+          cache: true
+
+      - name: Set release metadata
+        id: meta
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $version = "${{ github.ref_name }}".TrimStart("v")
+          } else {
+            $version = "0.7.0-${{ github.run_number }}"
+          }
+          $qtDeploy = Get-ChildItem -Path "${{ github.workspace }}\.qt" -Filter windeployqt.exe -Recurse | Select-Object -First 1
+          if (-not $qtDeploy) {
+            throw "windeployqt.exe not found under ${{ github.workspace }}\.qt"
+          }
+          $qtRoot = Split-Path (Split-Path $qtDeploy.FullName -Parent) -Parent
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "FINALIS_QT_PREFIX=$qtRoot" >> $env:GITHUB_ENV
+          "VCPKG_ROOT=${{ github.workspace }}\vcpkg" >> $env:GITHUB_ENV
+
+      - name: Configure
+        shell: pwsh
+        run: cmake --preset $env:BUILD_PRESET
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build --preset $env:BUILD_PRESET --target finalis-node finalis-lightserver finalis-explorer finalis-cli finalis-wallet finalis-tests
+
+      - name: Import code signing certificate
+        if: ${{ env.WINDOWS_SIGN_PFX_BASE64 != '' && env.WINDOWS_SIGN_PFX_PASSWORD != '' }}
+        shell: pwsh
+        run: |
+          $certDir = "${{ github.workspace }}\dist\codesign"
+          New-Item -ItemType Directory -Force -Path $certDir | Out-Null
+          $pfxPath = Join-Path $certDir "finalis-codesign.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String("${env:WINDOWS_SIGN_PFX_BASE64}"))
+          "WINDOWS_SIGN_PFX_PATH=$pfxPath" >> $env:GITHUB_ENV
+
+      - name: Sign Windows binaries
+        if: ${{ env.WINDOWS_SIGN_PFX_PATH != '' && env.WINDOWS_SIGN_PFX_PASSWORD != '' }}
+        shell: pwsh
+        run: |
+          $signtool = (Get-Command signtool.exe -ErrorAction Stop).Source
+          $timestampUrl = if ("${env:WINDOWS_SIGN_TIMESTAMP_URL}") { "${env:WINDOWS_SIGN_TIMESTAMP_URL}" } else { "http://timestamp.digicert.com" }
+          $files = @(
+            "${{ github.workspace }}\build\windows-release\finalis-node.exe",
+            "${{ github.workspace }}\build\windows-release\finalis-lightserver.exe",
+            "${{ github.workspace }}\build\windows-release\finalis-explorer.exe",
+            "${{ github.workspace }}\build\windows-release\finalis-cli.exe",
+            "${{ github.workspace }}\build\windows-release\finalis-wallet.exe"
+          )
+          foreach ($file in $files) {
+            if (-not (Test-Path $file)) {
+              throw "Signing target missing: $file"
+            }
+            & $signtool sign /fd SHA256 /td SHA256 /f "${env:WINDOWS_SIGN_PFX_PATH}" /p "${env:WINDOWS_SIGN_PFX_PASSWORD}" /tr $timestampUrl $file
+            if ($LASTEXITCODE -ne 0) {
+              throw "signtool failed for $file"
+            }
+          }
+
+      - name: Run core tests
+        shell: pwsh
+        run: |
+          $logDir = "${{ github.workspace }}\dist\test-logs"
+          New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+          $logPath = Join-Path $logDir "finalis-tests.log"
+          $exe = "${{ github.workspace }}\build\windows-release\finalis-tests.exe"
+          & $exe 2>&1 | Tee-Object -FilePath $logPath
+          $exitCode = $LASTEXITCODE
+          Write-Host "== Failed test lines =="
+          Select-String -Path $logPath -Pattern '^\[fail ','^\[failed-summary\]' | ForEach-Object { $_.Line }
+          if ($exitCode -ne 0) { exit $exitCode }
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finalis-core-windows-test-logs-${{ steps.meta.outputs.version }}
+          path: dist/test-logs
+
+      - name: Stage Windows payload
+        shell: pwsh
+        run: >
+          .\packaging\windows\Stage-WindowsRelease.ps1
+          -BuildDir "${{ github.workspace }}\build\windows-release"
+          -Configuration Release
+          -StageRoot "${{ github.workspace }}\dist\windows"
+          -QtRootDir "${{ env.FINALIS_QT_PREFIX }}"
+          -VcpkgInstalledDir "${{ github.workspace }}\build\windows-release\vcpkg_installed\x64-windows"
+
+      - name: Build installer
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.5
+        with:
+          path: packaging/windows/finalis-core.iss
+          options: >
+            /DMyAppVersion=${{ steps.meta.outputs.version }}
+            /DSourceDir=${{ github.workspace }}\dist\windows\payload
+            /DOutputDir=${{ github.workspace }}\dist\installer
+
+      - name: Sign installer
+        if: ${{ env.WINDOWS_SIGN_PFX_PATH != '' && env.WINDOWS_SIGN_PFX_PASSWORD != '' }}
+        shell: pwsh
+        run: |
+          $signtool = (Get-Command signtool.exe -ErrorAction Stop).Source
+          $timestampUrl = if ("${env:WINDOWS_SIGN_TIMESTAMP_URL}") { "${env:WINDOWS_SIGN_TIMESTAMP_URL}" } else { "http://timestamp.digicert.com" }
+          $installer = "${{ github.workspace }}\dist\installer\finalis-core_installer.exe"
+          if (-not (Test-Path $installer)) {
+            throw "Installer missing: $installer"
+          }
+          & $signtool sign /fd SHA256 /td SHA256 /f "${env:WINDOWS_SIGN_PFX_PATH}" /p "${env:WINDOWS_SIGN_PFX_PASSWORD}" /tr $timestampUrl $installer
+          if ($LASTEXITCODE -ne 0) {
+            throw "signtool failed for installer"
+          }
+
+      - name: Upload staged payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: finalis-core-windows-payload-${{ steps.meta.outputs.version }}
+          path: dist/windows/payload
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: finalis-core-installer-${{ steps.meta.outputs.version }}
+          path: dist/installer/finalis-core_installer.exe

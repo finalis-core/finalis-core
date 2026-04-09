@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.20)
 project(finalis_core LANGUAGES CXX)
 
 include(GNUInstallDirs)
+if(WIN32)
+  set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION ${CMAKE_INSTALL_BINDIR})
+  set(CMAKE_INSTALL_UCRT_LIBRARIES TRUE)
+  include(InstallRequiredSystemLibraries)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,6 +20,7 @@ option(FINALIS_STRICT_WARNINGS "Enable strict warning flags" OFF)
 
 find_package(OpenSSL REQUIRED)
 find_package(Qt5 COMPONENTS Widgets QUIET)
+find_package(ZLIB QUIET)
 
 # Optional libs: RocksDB and libsodium. Build falls back gracefully if unavailable.
 find_library(SODIUM_LIB sodium)
@@ -90,6 +96,12 @@ if(ROCKSDB_LIB AND ROCKSDB_INCLUDE_DIR)
   target_include_directories(finalis_core PUBLIC ${ROCKSDB_INCLUDE_DIR})
   target_link_libraries(finalis_core PUBLIC ${ROCKSDB_LIB})
 endif()
+if(ZLIB_FOUND)
+  target_link_libraries(finalis_core PUBLIC ZLIB::ZLIB)
+endif()
+if(WIN32)
+  target_link_libraries(finalis_core PUBLIC ws2_32 rpcrt4 shlwapi)
+endif()
 
 if(FINALIS_STRICT_WARNINGS)
   target_compile_options(finalis_core PRIVATE -Wall -Wextra -Wpedantic)
@@ -107,6 +119,9 @@ if(FINALIS_SANITIZE)
   target_compile_options(finalis-node PRIVATE ${SC_SAN_FLAGS})
   target_link_options(finalis-node PRIVATE -fsanitize=address,undefined)
 endif()
+install(TARGETS finalis-node
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
 
 add_executable(finalis-cli apps/finalis-cli/main.cpp)
 target_link_libraries(finalis-cli PRIVATE finalis_core)
@@ -114,6 +129,9 @@ if(FINALIS_SANITIZE)
   target_compile_options(finalis-cli PRIVATE ${SC_SAN_FLAGS})
   target_link_options(finalis-cli PRIVATE -fsanitize=address,undefined)
 endif()
+install(TARGETS finalis-cli
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
 
 add_executable(finalis-lightserver apps/finalis-lightserver/main.cpp)
 target_link_libraries(finalis-lightserver PRIVATE finalis_core)
@@ -121,6 +139,9 @@ if(FINALIS_SANITIZE)
   target_compile_options(finalis-lightserver PRIVATE ${SC_SAN_FLAGS})
   target_link_options(finalis-lightserver PRIVATE -fsanitize=address,undefined)
 endif()
+install(TARGETS finalis-lightserver
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
 
 add_executable(checkpoint-fixture-export tools/checkpoint_fixture_export.cpp)
 target_link_libraries(checkpoint-fixture-export PRIVATE finalis_core)
@@ -135,6 +156,9 @@ if(FINALIS_SANITIZE)
   target_compile_options(finalis-explorer PRIVATE ${SC_SAN_FLAGS})
   target_link_options(finalis-explorer PRIVATE -fsanitize=address,undefined)
 endif()
+install(TARGETS finalis-explorer
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
 
 if(Qt5Widgets_FOUND)
   add_executable(finalis-wallet
@@ -206,6 +230,26 @@ if(Qt5Widgets_FOUND)
   endif()
 else()
   message(STATUS "Qt5 Widgets not found; skipping finalis-wallet target")
+endif()
+
+set(FINALIS_INSTALL_DOC_DIR "${CMAKE_INSTALL_DATAROOTDIR}/doc/finalis-core")
+install(FILES
+  ${CMAKE_CURRENT_SOURCE_DIR}/README.md
+  ${CMAKE_CURRENT_SOURCE_DIR}/apps/finalis-explorer/README.md
+  ${CMAKE_CURRENT_SOURCE_DIR}/apps/finalis-wallet/README.md
+  ${CMAKE_CURRENT_SOURCE_DIR}/docs/LIVE_PROTOCOL.md
+  ${CMAKE_CURRENT_SOURCE_DIR}/docs/ADDRESSES.md
+  DESTINATION ${FINALIS_INSTALL_DOC_DIR}
+)
+install(FILES
+  ${CMAKE_CURRENT_SOURCE_DIR}/branding/finalis-app-icon.png
+  ${CMAKE_CURRENT_SOURCE_DIR}/branding/finalis-logo-horizontal.png
+  DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/finalis-core/branding
+)
+if(WIN32 AND CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
+  install(PROGRAMS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+  )
 endif()
 
 add_executable(finalis-tests

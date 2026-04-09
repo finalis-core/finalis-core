@@ -1,9 +1,4 @@
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <unistd.h>
-
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -18,11 +13,13 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <mutex>
 #include <vector>
 
 #include "address/address.hpp"
 #include "codec/bytes.hpp"
 #include "common/minijson.hpp"
+#include "common/socket_compat.hpp"
 #include "crypto/hash.hpp"
 #include "lightserver/client.hpp"
 #include "utxo/tx.hpp"
@@ -264,6 +261,39 @@ struct RecentTxResult {
   std::optional<std::string> flow_summary;
 };
 
+template <typename T>
+struct TimedCacheEntry {
+  std::string key;
+  std::chrono::steady_clock::time_point stored_at{};
+  T value{};
+  bool valid{false};
+};
+
+std::mutex g_status_cache_mu;
+TimedCacheEntry<LookupResult<StatusResult>> g_status_cache;
+std::mutex g_recent_tx_cache_mu;
+TimedCacheEntry<std::vector<RecentTxResult>> g_recent_tx_cache;
+std::mutex g_committee_cache_mu;
+TimedCacheEntry<LookupResult<CommitteeResult>> g_committee_cache;
+std::mutex g_log_mu;
+constexpr auto kSlowRpcThreshold = std::chrono::milliseconds(200);
+constexpr auto kSlowRequestThreshold = std::chrono::milliseconds(500);
+
+void clear_runtime_caches() {
+  {
+    std::lock_guard<std::mutex> guard(g_status_cache_mu);
+    g_status_cache = {};
+  }
+  {
+    std::lock_guard<std::mutex> guard(g_recent_tx_cache_mu);
+    g_recent_tx_cache = {};
+  }
+  {
+    std::lock_guard<std::mutex> guard(g_committee_cache_mu);
+    g_committee_cache = {};
+  }
+}
+
 struct TxSummaryBatchItem {
   std::string txid;
   std::optional<std::uint64_t> height;
@@ -288,7 +318,11 @@ struct Response {
   std::optional<std::string> location;
 };
 
+Response handle_request(const Config& cfg, const std::string& req);
+
 volatile std::sig_atomic_t g_stop = 0;
+std::atomic<std::size_t> g_active_clients{0};
+constexpr std::size_t kMaxConcurrentClients = 64;
 
 void on_signal(int) { g_stop = 1; }
 
@@ -461,7 +495,11 @@ std::string summarize_flow_mix(const std::map<std::string, std::size_t>& flow_mi
 std::string format_timestamp(std::uint64_t ts) {
   std::time_t tt = static_cast<std::time_t>(ts);
   std::tm tm{};
+#ifdef _WIN32
+  if (::gmtime_s(&tm, &tt) != 0) return std::to_string(ts);
+#else
   if (::gmtime_r(&tt, &tm) == nullptr) return std::to_string(ts);
+#endif
   std::ostringstream oss;
   oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S UTC") << " (" << ts << ")";
   return oss.str();
@@ -909,6 +947,7 @@ RpcGetUtxosFn g_rpc_get_utxos = [](const std::string& rpc_url, const Hash32& scr
 };
 
 RpcCallResult rpc_call(const std::string& rpc_url, const std::string& method, const std::string& params_json) {
+  const auto started = std::chrono::steady_clock::now();
   RpcCallResult out;
   const std::string body =
       std::string(R"({"jsonrpc":"2.0","id":1,"method":")") + json_escape(method) + R"(","params":)" + params_json + "}";
@@ -940,9 +979,17 @@ RpcCallResult rpc_call(const std::string& rpc_url, const std::string& method, co
   const auto* result = root->get("result");
   if (!result) {
     out.error = "missing rpc result";
-    return out;
+  } else {
+    out.result = *result;
   }
-  out.result = *result;
+
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+  if (elapsed >= kSlowRpcThreshold) {
+    std::lock_guard<std::mutex> guard(g_log_mu);
+    std::cerr << "[explorer] slow-rpc method=" << method << " duration_ms=" << elapsed.count();
+    if (!out.error.empty()) std::cerr << " error=" << out.error;
+    std::cerr << "\n";
+  }
   return out;
 }
 
@@ -1353,135 +1400,163 @@ std::vector<std::string> fetch_transition_txids(const Config& cfg, const finalis
 }
 
 LookupResult<StatusResult> fetch_status_result(const Config& cfg) {
+  {
+    std::lock_guard<std::mutex> guard(g_status_cache_mu);
+    if (g_status_cache.valid && g_status_cache.key == cfg.rpc_url &&
+        (std::chrono::steady_clock::now() - g_status_cache.stored_at) < std::chrono::seconds(2)) {
+      return g_status_cache.value;
+    }
+  }
+
   LookupResult<StatusResult> out;
   auto status = rpc_call(cfg.rpc_url, "get_status", "{}");
   if (!status.result.has_value() || !status.result->is_object()) {
     out.error = upstream_error(status.error.empty() ? "status unavailable" : status.error);
-    return out;
-  }
-  StatusResult result;
-  result.network = object_string(&*status.result, "network_name").value_or("unknown");
-  result.network_id = object_string(&*status.result, "network_id").value_or("");
-  result.genesis_hash = object_string(&*status.result, "genesis_hash").value_or("");
-  result.finalized_height = object_u64(&*status.result, "finalized_height").value_or(0);
-  result.finalized_transition_hash = object_string(&*status.result, "finalized_transition_hash")
-                                         .value_or(object_string(&*status.result, "transition_hash").value_or(""));
-  result.backend_version = object_string(&*status.result, "version").value_or("unknown");
-  result.wallet_api_version = object_string(&*status.result, "wallet_api_version").value_or("");
-  result.protocol_reserve_balance = object_u64(&*status.result, "protocol_reserve_balance");
-  result.healthy_peer_count = object_u64(&*status.result, "healthy_peer_count").value_or(0);
-  result.established_peer_count = object_u64(&*status.result, "established_peer_count").value_or(0);
-  result.latest_finality_committee_size =
-      static_cast<std::size_t>(object_u64(&*status.result, "latest_finality_committee_size").value_or(0));
-  result.latest_finality_quorum_threshold =
-      static_cast<std::size_t>(object_u64(&*status.result, "latest_finality_quorum_threshold").value_or(0));
-  if (const auto* sync = status.result->get("sync"); sync && sync->is_object()) {
-    result.observed_network_height_known = object_bool(sync, "observed_network_height_known").value_or(false);
-    result.bootstrap_sync_incomplete = object_bool(sync, "bootstrap_sync_incomplete").value_or(false);
-    result.peer_height_disagreement = object_bool(sync, "peer_height_disagreement").value_or(false);
-    result.finalized_lag = object_u64(sync, "finalized_lag");
-    if (result.observed_network_height_known) {
-      result.observed_network_finalized_height = object_u64(sync, "observed_network_finalized_height");
+  } else {
+    StatusResult result;
+    result.network = object_string(&*status.result, "network_name").value_or("unknown");
+    result.network_id = object_string(&*status.result, "network_id").value_or("");
+    result.genesis_hash = object_string(&*status.result, "genesis_hash").value_or("");
+    result.finalized_height = object_u64(&*status.result, "finalized_height").value_or(0);
+    result.finalized_transition_hash = object_string(&*status.result, "finalized_transition_hash")
+                                           .value_or(object_string(&*status.result, "transition_hash").value_or(""));
+    result.backend_version = object_string(&*status.result, "version").value_or("unknown");
+    result.wallet_api_version = object_string(&*status.result, "wallet_api_version").value_or("");
+    result.protocol_reserve_balance = object_u64(&*status.result, "protocol_reserve_balance");
+    result.healthy_peer_count = object_u64(&*status.result, "healthy_peer_count").value_or(0);
+    result.established_peer_count = object_u64(&*status.result, "established_peer_count").value_or(0);
+    result.latest_finality_committee_size =
+        static_cast<std::size_t>(object_u64(&*status.result, "latest_finality_committee_size").value_or(0));
+    result.latest_finality_quorum_threshold =
+        static_cast<std::size_t>(object_u64(&*status.result, "latest_finality_quorum_threshold").value_or(0));
+    if (const auto* sync = status.result->get("sync"); sync && sync->is_object()) {
+      result.observed_network_height_known = object_bool(sync, "observed_network_height_known").value_or(false);
+      result.bootstrap_sync_incomplete = object_bool(sync, "bootstrap_sync_incomplete").value_or(false);
+      result.peer_height_disagreement = object_bool(sync, "peer_height_disagreement").value_or(false);
+      result.finalized_lag = object_u64(sync, "finalized_lag");
+      if (result.observed_network_height_known) {
+        result.observed_network_finalized_height = object_u64(sync, "observed_network_finalized_height");
+      }
     }
-  }
-  if (const auto* availability = status.result->get("availability"); availability && availability->is_object()) {
-    result.availability_epoch = object_u64(availability, "epoch");
-    result.availability_retained_prefix_count = object_u64(availability, "retained_prefix_count");
-    result.availability_tracked_operator_count = object_u64(availability, "tracked_operator_count");
-    result.availability_eligible_operator_count = object_u64(availability, "eligible_operator_count");
-    result.availability_below_min_eligible = object_bool(availability, "below_min_eligible");
-    result.availability_checkpoint_derivation_mode = object_string(availability, "checkpoint_derivation_mode");
-    result.availability_checkpoint_fallback_reason = object_string(availability, "checkpoint_fallback_reason");
-    result.availability_fallback_sticky = object_bool(availability, "fallback_sticky");
-    if (const auto* adaptive = availability->get("adaptive_regime"); adaptive && adaptive->is_object()) {
-      result.qualified_depth = object_u64(adaptive, "qualified_depth");
-      result.adaptive_target_committee_size = object_u64(adaptive, "adaptive_target_committee_size");
-      result.adaptive_min_eligible = object_u64(adaptive, "adaptive_min_eligible");
-      result.adaptive_min_bond = object_u64(adaptive, "adaptive_min_bond");
-      result.adaptive_slack = object_i64(adaptive, "slack");
-      result.target_expand_streak = object_u64(adaptive, "target_expand_streak");
-      result.target_contract_streak = object_u64(adaptive, "target_contract_streak");
-      result.adaptive_fallback_rate_bps = object_u64(adaptive, "fallback_rate_bps");
-      result.adaptive_sticky_fallback_rate_bps = object_u64(adaptive, "sticky_fallback_rate_bps");
-      result.adaptive_fallback_window_epochs = object_u64(adaptive, "fallback_rate_window_epochs");
-      result.adaptive_near_threshold_operation = object_bool(adaptive, "near_threshold_operation");
-      result.adaptive_prolonged_expand_buildup = object_bool(adaptive, "prolonged_expand_buildup");
-      result.adaptive_prolonged_contract_buildup = object_bool(adaptive, "prolonged_contract_buildup");
-      result.adaptive_repeated_sticky_fallback = object_bool(adaptive, "repeated_sticky_fallback");
-      result.adaptive_depth_collapse_after_bond_increase = object_bool(adaptive, "depth_collapse_after_bond_increase");
+    if (const auto* availability = status.result->get("availability"); availability && availability->is_object()) {
+      result.availability_epoch = object_u64(availability, "epoch");
+      result.availability_retained_prefix_count = object_u64(availability, "retained_prefix_count");
+      result.availability_tracked_operator_count = object_u64(availability, "tracked_operator_count");
+      result.availability_eligible_operator_count = object_u64(availability, "eligible_operator_count");
+      result.availability_below_min_eligible = object_bool(availability, "below_min_eligible");
+      result.availability_checkpoint_derivation_mode = object_string(availability, "checkpoint_derivation_mode");
+      result.availability_checkpoint_fallback_reason = object_string(availability, "checkpoint_fallback_reason");
+      result.availability_fallback_sticky = object_bool(availability, "fallback_sticky");
+      if (const auto* adaptive = availability->get("adaptive_regime"); adaptive && adaptive->is_object()) {
+        result.qualified_depth = object_u64(adaptive, "qualified_depth");
+        result.adaptive_target_committee_size = object_u64(adaptive, "adaptive_target_committee_size");
+        result.adaptive_min_eligible = object_u64(adaptive, "adaptive_min_eligible");
+        result.adaptive_min_bond = object_u64(adaptive, "adaptive_min_bond");
+        result.adaptive_slack = object_i64(adaptive, "slack");
+        result.target_expand_streak = object_u64(adaptive, "target_expand_streak");
+        result.target_contract_streak = object_u64(adaptive, "target_contract_streak");
+        result.adaptive_fallback_rate_bps = object_u64(adaptive, "fallback_rate_bps");
+        result.adaptive_sticky_fallback_rate_bps = object_u64(adaptive, "sticky_fallback_rate_bps");
+        result.adaptive_fallback_window_epochs = object_u64(adaptive, "fallback_rate_window_epochs");
+        result.adaptive_near_threshold_operation = object_bool(adaptive, "near_threshold_operation");
+        result.adaptive_prolonged_expand_buildup = object_bool(adaptive, "prolonged_expand_buildup");
+        result.adaptive_prolonged_contract_buildup = object_bool(adaptive, "prolonged_contract_buildup");
+        result.adaptive_repeated_sticky_fallback = object_bool(adaptive, "repeated_sticky_fallback");
+        result.adaptive_depth_collapse_after_bond_increase = object_bool(adaptive, "depth_collapse_after_bond_increase");
+      }
+      if (const auto* local = availability->get("local_operator"); local && local->is_object()) {
+        result.availability_local_operator_known = object_bool(local, "known");
+        result.availability_local_operator_pubkey = object_string(local, "pubkey");
+        result.availability_local_operator_status = object_string(local, "status");
+        result.availability_local_operator_seat_budget = object_u64(local, "seat_budget");
+      }
     }
-    if (const auto* local = availability->get("local_operator"); local && local->is_object()) {
-      result.availability_local_operator_known = object_bool(local, "known");
-      result.availability_local_operator_pubkey = object_string(local, "pubkey");
-      result.availability_local_operator_status = object_string(local, "status");
-      result.availability_local_operator_seat_budget = object_u64(local, "seat_budget");
+    if (const auto* adaptive_summary = status.result->get("adaptive_telemetry_summary");
+        adaptive_summary && adaptive_summary->is_object()) {
+      result.adaptive_telemetry_window_epochs = object_u64(adaptive_summary, "window_epochs");
+      result.adaptive_telemetry_sample_count = object_u64(adaptive_summary, "sample_count");
+      result.adaptive_telemetry_fallback_epochs = object_u64(adaptive_summary, "fallback_epochs");
+      result.adaptive_telemetry_sticky_fallback_epochs = object_u64(adaptive_summary, "sticky_fallback_epochs");
     }
+    if (const auto* ticket_pow = status.result->get("ticket_pow"); ticket_pow && ticket_pow->is_object()) {
+      result.ticket_pow_difficulty = static_cast<std::uint32_t>(object_u64(ticket_pow, "difficulty").value_or(0));
+      result.ticket_pow_difficulty_min = static_cast<std::uint32_t>(object_u64(ticket_pow, "difficulty_min").value_or(0));
+      result.ticket_pow_difficulty_max = static_cast<std::uint32_t>(object_u64(ticket_pow, "difficulty_max").value_or(0));
+      result.ticket_pow_epoch_health = object_string(ticket_pow, "epoch_health").value_or("unknown");
+      result.ticket_pow_streak_up = object_u64(ticket_pow, "streak_up").value_or(0);
+      result.ticket_pow_streak_down = object_u64(ticket_pow, "streak_down").value_or(0);
+      result.ticket_pow_nonce_search_limit = object_u64(ticket_pow, "nonce_search_limit").value_or(0);
+      result.ticket_pow_bonus_cap_bps = static_cast<std::uint32_t>(object_u64(ticket_pow, "bonus_cap_bps").value_or(0));
+    }
+    out.value = std::move(result);
   }
-  if (const auto* adaptive_summary = status.result->get("adaptive_telemetry_summary");
-      adaptive_summary && adaptive_summary->is_object()) {
-    result.adaptive_telemetry_window_epochs = object_u64(adaptive_summary, "window_epochs");
-    result.adaptive_telemetry_sample_count = object_u64(adaptive_summary, "sample_count");
-    result.adaptive_telemetry_fallback_epochs = object_u64(adaptive_summary, "fallback_epochs");
-    result.adaptive_telemetry_sticky_fallback_epochs = object_u64(adaptive_summary, "sticky_fallback_epochs");
+  {
+    std::lock_guard<std::mutex> guard(g_status_cache_mu);
+    g_status_cache = TimedCacheEntry<LookupResult<StatusResult>>{
+        .key = cfg.rpc_url, .stored_at = std::chrono::steady_clock::now(), .value = out, .valid = true};
   }
-  if (const auto* ticket_pow = status.result->get("ticket_pow"); ticket_pow && ticket_pow->is_object()) {
-    result.ticket_pow_difficulty = static_cast<std::uint32_t>(object_u64(ticket_pow, "difficulty").value_or(0));
-    result.ticket_pow_difficulty_min = static_cast<std::uint32_t>(object_u64(ticket_pow, "difficulty_min").value_or(0));
-    result.ticket_pow_difficulty_max = static_cast<std::uint32_t>(object_u64(ticket_pow, "difficulty_max").value_or(0));
-    result.ticket_pow_epoch_health = object_string(ticket_pow, "epoch_health").value_or("unknown");
-    result.ticket_pow_streak_up = object_u64(ticket_pow, "streak_up").value_or(0);
-    result.ticket_pow_streak_down = object_u64(ticket_pow, "streak_down").value_or(0);
-    result.ticket_pow_nonce_search_limit = object_u64(ticket_pow, "nonce_search_limit").value_or(0);
-    result.ticket_pow_bonus_cap_bps = static_cast<std::uint32_t>(object_u64(ticket_pow, "bonus_cap_bps").value_or(0));
-  }
-  out.value = std::move(result);
   return out;
 }
 
 LookupResult<CommitteeResult> fetch_committee_result(const Config& cfg, std::uint64_t height) {
+  const std::string cache_key = cfg.rpc_url + "#committee#" + std::to_string(height);
+  {
+    std::lock_guard<std::mutex> guard(g_committee_cache_mu);
+    if (g_committee_cache.valid && g_committee_cache.key == cache_key &&
+        (std::chrono::steady_clock::now() - g_committee_cache.stored_at) < std::chrono::seconds(5)) {
+      return g_committee_cache.value;
+    }
+  }
+
   LookupResult<CommitteeResult> out;
   auto rpc = rpc_call(cfg.rpc_url, "get_committee",
                       std::string("{\"height\":") + std::to_string(height) + ",\"verbose\":true}");
   if (!rpc.result.has_value() || !rpc.result->is_object()) {
     out.error = rpc_not_found(rpc) ? not_found_error("committee unavailable in finalized state")
                                    : upstream_error(rpc.error.empty() ? "committee unavailable" : rpc.error);
-    return out;
+  } else {
+    CommitteeResult result;
+    result.height = object_u64(&*rpc.result, "height").value_or(height);
+    result.epoch_start_height = object_u64(&*rpc.result, "epoch_start_height").value_or(0);
+    result.checkpoint_derivation_mode = object_string(&*rpc.result, "checkpoint_derivation_mode");
+    result.checkpoint_fallback_reason = object_string(&*rpc.result, "checkpoint_fallback_reason");
+    result.fallback_sticky = object_bool(&*rpc.result, "fallback_sticky");
+    result.availability_eligible_operator_count = object_u64(&*rpc.result, "availability_eligible_operator_count");
+    result.availability_min_eligible_operators = object_u64(&*rpc.result, "availability_min_eligible_operators");
+    result.adaptive_target_committee_size = object_u64(&*rpc.result, "adaptive_target_committee_size");
+    result.adaptive_min_eligible = object_u64(&*rpc.result, "adaptive_min_eligible");
+    result.adaptive_min_bond = object_u64(&*rpc.result, "adaptive_min_bond");
+    result.qualified_depth = object_u64(&*rpc.result, "qualified_depth");
+    result.adaptive_slack = object_i64(&*rpc.result, "slack");
+    result.target_expand_streak = object_u64(&*rpc.result, "target_expand_streak");
+    result.target_contract_streak = object_u64(&*rpc.result, "target_contract_streak");
+    const auto* members = rpc.result->get("members");
+    if (!members || !members->is_array()) {
+      out.error = upstream_error("committee members missing");
+    } else {
+      for (const auto& member : members->array_value) {
+        if (!member.is_object()) continue;
+        CommitteeMemberResult item;
+        item.operator_id = object_string(&member, "operator_id");
+        item.representative_pubkey = object_string(&member, "representative_pubkey").value_or("");
+        item.resolved_operator_id = item.operator_id.value_or(item.representative_pubkey);
+        item.operator_id_source = item.operator_id.has_value() ? "operator_id" : "representative_pubkey";
+        item.base_weight = object_u64(&member, "base_weight");
+        item.ticket_bonus_bps = object_u64(&member, "ticket_bonus_bps");
+        item.final_weight = object_u64(&member, "final_weight");
+        item.ticket_hash = object_string(&member, "ticket_hash");
+        item.ticket_nonce = object_u64(&member, "ticket_nonce");
+        result.members.push_back(std::move(item));
+      }
+      out.value = std::move(result);
+    }
   }
-  CommitteeResult result;
-  result.height = object_u64(&*rpc.result, "height").value_or(height);
-  result.epoch_start_height = object_u64(&*rpc.result, "epoch_start_height").value_or(0);
-  result.checkpoint_derivation_mode = object_string(&*rpc.result, "checkpoint_derivation_mode");
-  result.checkpoint_fallback_reason = object_string(&*rpc.result, "checkpoint_fallback_reason");
-  result.fallback_sticky = object_bool(&*rpc.result, "fallback_sticky");
-  result.availability_eligible_operator_count = object_u64(&*rpc.result, "availability_eligible_operator_count");
-  result.availability_min_eligible_operators = object_u64(&*rpc.result, "availability_min_eligible_operators");
-  result.adaptive_target_committee_size = object_u64(&*rpc.result, "adaptive_target_committee_size");
-  result.adaptive_min_eligible = object_u64(&*rpc.result, "adaptive_min_eligible");
-  result.adaptive_min_bond = object_u64(&*rpc.result, "adaptive_min_bond");
-  result.qualified_depth = object_u64(&*rpc.result, "qualified_depth");
-  result.adaptive_slack = object_i64(&*rpc.result, "slack");
-  result.target_expand_streak = object_u64(&*rpc.result, "target_expand_streak");
-  result.target_contract_streak = object_u64(&*rpc.result, "target_contract_streak");
-  const auto* members = rpc.result->get("members");
-  if (!members || !members->is_array()) {
-    out.error = upstream_error("committee members missing");
-    return out;
+
+  {
+    std::lock_guard<std::mutex> guard(g_committee_cache_mu);
+    g_committee_cache = TimedCacheEntry<LookupResult<CommitteeResult>>{
+        .key = cache_key, .stored_at = std::chrono::steady_clock::now(), .value = out, .valid = true};
   }
-  for (const auto& member : members->array_value) {
-    if (!member.is_object()) continue;
-    CommitteeMemberResult item;
-    item.operator_id = object_string(&member, "operator_id");
-    item.representative_pubkey = object_string(&member, "representative_pubkey").value_or("");
-    item.resolved_operator_id = item.operator_id.value_or(item.representative_pubkey);
-    item.operator_id_source = item.operator_id.has_value() ? "operator_id" : "representative_pubkey";
-    item.base_weight = object_u64(&member, "base_weight");
-    item.ticket_bonus_bps = object_u64(&member, "ticket_bonus_bps");
-    item.final_weight = object_u64(&member, "final_weight");
-    item.ticket_hash = object_string(&member, "ticket_hash");
-    item.ticket_nonce = object_u64(&member, "ticket_nonce");
-    result.members.push_back(std::move(item));
-  }
-  out.value = std::move(result);
   return out;
 }
 
@@ -1818,6 +1893,15 @@ LookupResult<SearchResult> fetch_search_result(const Config& cfg, const std::str
 }
 
 std::vector<RecentTxResult> fetch_recent_tx_results(const Config& cfg, std::size_t max_items) {
+  const std::string cache_key = cfg.rpc_url + "#recent#" + std::to_string(max_items);
+  {
+    std::lock_guard<std::mutex> guard(g_recent_tx_cache_mu);
+    if (g_recent_tx_cache.valid && g_recent_tx_cache.key == cache_key &&
+        (std::chrono::steady_clock::now() - g_recent_tx_cache.stored_at) < std::chrono::seconds(3)) {
+      return g_recent_tx_cache.value;
+    }
+  }
+
   std::vector<RecentTxResult> out;
   if (max_items == 0) return out;
   auto status = fetch_status_result(cfg);
@@ -1892,6 +1976,11 @@ std::vector<RecentTxResult> fetch_recent_tx_results(const Config& cfg, std::size
       }
     }
     out.push_back(std::move(item));
+  }
+  {
+    std::lock_guard<std::mutex> guard(g_recent_tx_cache_mu);
+    g_recent_tx_cache = TimedCacheEntry<std::vector<RecentTxResult>>{
+        .key = cache_key, .stored_at = std::chrono::steady_clock::now(), .value = out, .valid = true};
   }
   return out;
 }
@@ -2506,7 +2595,7 @@ std::string render_address(const Config& cfg, const std::string& addr, const std
   return page_layout("Address " + addr, body.str(), "address");
 }
 
-bool write_all(int fd, const std::string& data) {
+bool write_all(finalis::net::SocketHandle fd, const std::string& data) {
   std::size_t off = 0;
   while (off < data.size()) {
     const ssize_t n = ::send(fd, data.data() + off, data.size() - off, 0);
@@ -2516,15 +2605,7 @@ bool write_all(int fd, const std::string& data) {
   return true;
 }
 
-void apply_socket_timeouts(int fd) {
-  timeval tv{};
-  tv.tv_sec = 15;
-  tv.tv_usec = 0;
-  (void)::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-  (void)::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-}
-
-std::optional<std::string> read_http_request(int fd) {
+std::optional<std::string> read_http_request(finalis::net::SocketHandle fd) {
   std::string req;
   std::array<char, 4096> buf{};
   while (req.find("\r\n\r\n") == std::string::npos) {
@@ -2567,6 +2648,42 @@ std::string http_response(const Response& resp) {
 
 std::string render_not_found() {
   return page_layout("Not Found", "<h1>Not Found</h1><div class=\"card\"><div class=\"note\">Unknown route.</div></div>");
+}
+
+std::string request_target_for_log(const std::optional<std::string>& req) {
+  if (!req.has_value()) return "(unparsed)";
+  const auto line_end = req->find("\r\n");
+  if (line_end == std::string::npos) return "(malformed)";
+  const std::string first = req->substr(0, line_end);
+  const auto sp1 = first.find(' ');
+  const auto sp2 = first.rfind(' ');
+  if (sp1 == std::string::npos || sp2 == std::string::npos || sp1 == sp2) return "(malformed)";
+  return first.substr(sp1 + 1, sp2 - sp1 - 1);
+}
+
+void handle_client_session(Config cfg, finalis::net::SocketHandle fd) {
+  struct ActiveGuard {
+    ~ActiveGuard() { --g_active_clients; }
+  } guard;
+
+  const auto started = std::chrono::steady_clock::now();
+  (void)finalis::net::set_socket_timeouts(fd, 15'000);
+  auto req = read_http_request(fd);
+  const Response resp_obj =
+      req.has_value() ? handle_request(cfg, *req)
+                      : html_response(400, page_layout("Bad Request", "<h1>Bad Request</h1>"));
+  const std::string resp = http_response(resp_obj);
+  (void)write_all(fd, resp);
+  finalis::net::shutdown_socket(fd);
+  finalis::net::close_socket(fd);
+
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+  if (elapsed >= kSlowRequestThreshold) {
+    std::lock_guard<std::mutex> guard_log(g_log_mu);
+    std::cerr << "[explorer] slow-request target=" << request_target_for_log(req)
+              << " status=" << resp_obj.status
+              << " duration_ms=" << elapsed.count() << "\n";
+  }
 }
 
 Response handle_request(const Config& cfg, const std::string& req) {
@@ -2694,30 +2811,33 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
-  if (listen_fd < 0) {
+  if (!finalis::net::ensure_sockets()) {
+    std::cerr << "socket init failed\n";
+    return 1;
+  }
+  auto listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (!finalis::net::valid_socket(listen_fd)) {
     std::cerr << "socket failed\n";
     return 1;
   }
-  int one = 1;
-  (void)::setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+  (void)finalis::net::set_reuseaddr(listen_fd);
 
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(cfg->port);
   if (::inet_pton(AF_INET, cfg->bind_ip.c_str(), &addr.sin_addr) != 1) {
     std::cerr << "invalid bind address\n";
-    ::close(listen_fd);
+    finalis::net::close_socket(listen_fd);
     return 1;
   }
   if (::bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
     std::cerr << "bind failed\n";
-    ::close(listen_fd);
+    finalis::net::close_socket(listen_fd);
     return 1;
   }
   if (::listen(listen_fd, 32) != 0) {
     std::cerr << "listen failed\n";
-    ::close(listen_fd);
+    finalis::net::close_socket(listen_fd);
     return 1;
   }
 
@@ -2729,22 +2849,24 @@ int main(int argc, char** argv) {
   while (!g_stop) {
     sockaddr_in client{};
     socklen_t len = sizeof(client);
-    const int fd = ::accept(listen_fd, reinterpret_cast<sockaddr*>(&client), &len);
-    if (fd < 0) {
+    const auto fd = ::accept(listen_fd, reinterpret_cast<sockaddr*>(&client), &len);
+    if (!finalis::net::valid_socket(fd)) {
       if (g_stop) break;
       continue;
     }
-    apply_socket_timeouts(fd);
-    auto req = read_http_request(fd);
-    const Response resp_obj =
-        req.has_value() ? handle_request(*cfg, *req)
-                        : html_response(400, page_layout("Bad Request", "<h1>Bad Request</h1>"));
-    const std::string resp = http_response(resp_obj);
-    (void)write_all(fd, resp);
-    ::shutdown(fd, SHUT_RDWR);
-    ::close(fd);
+    const std::size_t active = g_active_clients.load();
+    if (active >= kMaxConcurrentClients) {
+      const std::string resp = http_response(
+          html_response(503, page_layout("Busy", "<div class=\"card\"><div class=\"note\">Explorer is busy. Retry shortly.</div></div>")));
+      (void)write_all(fd, resp);
+      finalis::net::shutdown_socket(fd);
+      finalis::net::close_socket(fd);
+      continue;
+    }
+    ++g_active_clients;
+    std::thread(handle_client_session, *cfg, fd).detach();
   }
 
-  ::close(listen_fd);
+  finalis::net::close_socket(listen_fd);
   return 0;
 }

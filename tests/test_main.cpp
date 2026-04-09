@@ -36,7 +36,11 @@ void register_integration_tests();
 void register_lightserver_tests();
 
 int main() {
+#ifdef _WIN32
+  _putenv_s("FINALIS_TEST_QUIET_LOGS", "1");
+#else
   setenv("FINALIS_TEST_QUIET_LOGS", "1", 1);
+#endif
   // Default test runner: current live epoch-ticket runtime.
   register_codec_tests();
   register_chain_id_tests();
@@ -63,6 +67,7 @@ int main() {
   register_lightserver_tests();
 
   int failed = 0;
+  std::vector<std::string> failed_names;
   const char* filter = std::getenv("FINALIS_TEST_FILTER");
   std::vector<std::pair<std::string, TestFn>> selected;
   selected.reserve(tests().size());
@@ -85,10 +90,15 @@ int main() {
       std::cout << "[ok " << index << "/" << total << "] " << name << "\n";
     } catch (const std::exception& e) {
       ++failed;
+      failed_names.push_back(name);
       std::cout << "[fail " << index << "/" << total << "] " << name << ": " << e.what() << "\n";
     }
   }
   if (failed) {
+    std::cerr << "[failed-summary] count=" << failed << "\n";
+    for (const auto& name : failed_names) {
+      std::cerr << "[failed-summary] " << name << "\n";
+    }
     std::cerr << failed << " tests failed\n";
     return 1;
   }

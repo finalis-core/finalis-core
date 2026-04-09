@@ -10,6 +10,7 @@
 
 #include "common/chain_id.hpp"
 #include "common/network.hpp"
+#include "common/socket_compat.hpp"
 #include "storage/db.hpp"
 
 namespace finalis::lightserver {
@@ -18,7 +19,7 @@ struct Config {
   NetworkConfig network{mainnet_network()};
   std::string bind_ip{"127.0.0.1"};
   std::uint16_t port{0};
-  std::string db_path{".finalis/mainnet"};
+  std::string db_path{"~/.finalis/mainnet"};
   std::size_t max_committee{MAX_COMMITTEE};
   std::string tx_relay_host{"127.0.0.1"};
   std::uint16_t tx_relay_port{0};
@@ -38,7 +39,7 @@ class Server {
 
  private:
   void accept_loop();
-  void handle_client(int fd);
+  void handle_client(net::SocketHandle fd);
   std::string handle_rpc_body(const std::string& body);
 
   std::string make_error(const std::string& id_token, int code, const std::string& msg) const;
@@ -49,7 +50,7 @@ class Server {
 
   Config cfg_;
   storage::DB db_;
-  int listen_fd_{-1};
+  net::SocketHandle listen_fd_{net::kInvalidSocket};
   std::uint16_t bound_port_{0};
   std::atomic<bool> running_{false};
   std::thread accept_thread_;

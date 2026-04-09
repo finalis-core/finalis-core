@@ -2,6 +2,8 @@ name: finalis-wallet-packaging
 
 on:
   push:
+    branches-ignore:
+      - "windows-installer-test"
     paths:
       - "apps/finalis-wallet/**"
       - "docs/REFERENCE_WALLET_SPEC.md"
@@ -13,6 +15,8 @@ on:
       - "CMakeLists.txt"
       - ".github/workflows/finalis-wallet-packaging.yml"
   pull_request:
+    branches-ignore:
+      - "windows-installer-test"
     paths:
       - "apps/finalis-wallet/**"
       - "docs/REFERENCE_WALLET_SPEC.md"
