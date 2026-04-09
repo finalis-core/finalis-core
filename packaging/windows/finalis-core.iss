@@ -14,7 +14,7 @@ AppId={{EAA24893-1A6A-4E25-A528-33AB32D54C3B}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher=Finalis Core
-AppPublisherURL=https://github.com/
+AppPublisherURL=https://github.com/finalis-core/finalis-core
 DefaultDirName={autopf}\Finalis Core
 DefaultGroupName=Finalis Core
 OutputDir={#OutputDir}
@@ -26,6 +26,8 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 DisableProgramGroupPage=no
 UninstallDisplayIcon={app}\app\bin\finalis-wallet.exe
+WizardImageFile={#SourceDir}\installer-assets\finalis-wizard.bmp
+WizardSmallImageFile={#SourceDir}\installer-assets\finalis-wizard-small.bmp
 
 [Tasks]
 Name: "desktopicon"; Description: "Create desktop shortcuts"; GroupDescription: "Additional icons:"

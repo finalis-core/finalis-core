@@ -279,6 +279,21 @@ std::mutex g_log_mu;
 constexpr auto kSlowRpcThreshold = std::chrono::milliseconds(200);
 constexpr auto kSlowRequestThreshold = std::chrono::milliseconds(500);
 
+void clear_runtime_caches() {
+  {
+    std::lock_guard<std::mutex> guard(g_status_cache_mu);
+    g_status_cache = {};
+  }
+  {
+    std::lock_guard<std::mutex> guard(g_recent_tx_cache_mu);
+    g_recent_tx_cache = {};
+  }
+  {
+    std::lock_guard<std::mutex> guard(g_committee_cache_mu);
+    g_committee_cache = {};
+  }
+}
+
 struct TxSummaryBatchItem {
   std::string txid;
   std::optional<std::uint64_t> height;

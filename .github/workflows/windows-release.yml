@@ -79,6 +79,39 @@ jobs:
         shell: pwsh
         run: cmake --build --preset $env:BUILD_PRESET --target finalis-node finalis-lightserver finalis-explorer finalis-cli finalis-wallet finalis-tests
 
+      - name: Import code signing certificate
+        if: ${{ secrets.WINDOWS_SIGN_PFX_BASE64 != '' && secrets.WINDOWS_SIGN_PFX_PASSWORD != '' }}
+        shell: pwsh
+        run: |
+          $certDir = "${{ github.workspace }}\dist\codesign"
+          New-Item -ItemType Directory -Force -Path $certDir | Out-Null
+          $pfxPath = Join-Path $certDir "finalis-codesign.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String("${{ secrets.WINDOWS_SIGN_PFX_BASE64 }}"))
+          "WINDOWS_SIGN_PFX_PATH=$pfxPath" >> $env:GITHUB_ENV
+
+      - name: Sign Windows binaries
+        if: ${{ env.WINDOWS_SIGN_PFX_PATH != '' && secrets.WINDOWS_SIGN_PFX_PASSWORD != '' }}
+        shell: pwsh
+        run: |
+          $signtool = (Get-Command signtool.exe -ErrorAction Stop).Source
+          $timestampUrl = if ("${{ secrets.WINDOWS_SIGN_TIMESTAMP_URL }}") { "${{ secrets.WINDOWS_SIGN_TIMESTAMP_URL }}" } else { "http://timestamp.digicert.com" }
+          $files = @(
+            "${{ github.workspace }}\build\windows-release\finalis-node.exe",
+            "${{ github.workspace }}\build\windows-release\finalis-lightserver.exe",
+            "${{ github.workspace }}\build\windows-release\finalis-explorer.exe",
+            "${{ github.workspace }}\build\windows-release\finalis-cli.exe",
+            "${{ github.workspace }}\build\windows-release\finalis-wallet.exe"
+          )
+          foreach ($file in $files) {
+            if (-not (Test-Path $file)) {
+              throw "Signing target missing: $file"
+            }
+            & $signtool sign /fd SHA256 /td SHA256 /f "${env:WINDOWS_SIGN_PFX_PATH}" /p "${{ secrets.WINDOWS_SIGN_PFX_PASSWORD }}" /tr $timestampUrl $file
+            if ($LASTEXITCODE -ne 0) {
+              throw "signtool failed for $file"
+            }
+          }
+
       - name: Run core tests
         shell: pwsh
         run: |
@@ -117,6 +150,21 @@ jobs:
             /DMyAppVersion=${{ steps.meta.outputs.version }}
             /DSourceDir=${{ github.workspace }}\dist\windows\payload
             /DOutputDir=${{ github.workspace }}\dist\installer
+
+      - name: Sign installer
+        if: ${{ env.WINDOWS_SIGN_PFX_PATH != '' && secrets.WINDOWS_SIGN_PFX_PASSWORD != '' }}
+        shell: pwsh
+        run: |
+          $signtool = (Get-Command signtool.exe -ErrorAction Stop).Source
+          $timestampUrl = if ("${{ secrets.WINDOWS_SIGN_TIMESTAMP_URL }}") { "${{ secrets.WINDOWS_SIGN_TIMESTAMP_URL }}" } else { "http://timestamp.digicert.com" }
+          $installer = "${{ github.workspace }}\dist\installer\finalis-core_installer.exe"
+          if (-not (Test-Path $installer)) {
+            throw "Installer missing: $installer"
+          }
+          & $signtool sign /fd SHA256 /td SHA256 /f "${env:WINDOWS_SIGN_PFX_PATH}" /p "${{ secrets.WINDOWS_SIGN_PFX_PASSWORD }}" /tr $timestampUrl $installer
+          if ($LASTEXITCODE -ne 0) {
+            throw "signtool failed for installer"
+          }
 
       - name: Upload staged payload
         uses: actions/upload-artifact@v4

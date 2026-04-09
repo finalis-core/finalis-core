@@ -16,6 +16,8 @@ std::string getenv_string(const char* name) {
 }
 
 std::string preferred_user_root() {
+  std::string home = getenv_string("HOME");
+  if (!home.empty()) return home;
 #ifdef _WIN32
   std::string appdata = getenv_string("APPDATA");
   if (!appdata.empty()) return appdata;
@@ -27,7 +29,7 @@ std::string preferred_user_root() {
   std::string homepath = getenv_string("HOMEPATH");
   if (!homedrive.empty() && !homepath.empty()) return homedrive + homepath;
 #endif
-  return getenv_string("HOME");
+  return {};
 }
 
 }  // namespace

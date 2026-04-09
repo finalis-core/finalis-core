@@ -30,6 +30,27 @@ function Copy-OptionalFile {
     }
 }
 
+function Convert-PngToBmp {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Source,
+        [Parameter(Mandatory = $true)]
+        [string]$Destination
+    )
+
+    if (-not (Test-Path $Source)) {
+        return
+    }
+
+    Add-Type -AssemblyName System.Drawing
+    $bitmap = New-Object System.Drawing.Bitmap $Source
+    try {
+        $bitmap.Save($Destination, [System.Drawing.Imaging.ImageFormat]::Bmp)
+    } finally {
+        $bitmap.Dispose()
+    }
+}
+
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $resolvedBuildDir = Resolve-Path $BuildDir
 $resolvedStageRoot = Join-Path $StageRoot "payload"
@@ -37,6 +58,7 @@ $installRoot = Join-Path $resolvedStageRoot "app"
 $binDir = Join-Path $installRoot "bin"
 $scriptsDir = Join-Path $installRoot "scripts"
 $docsDir = Join-Path $installRoot "share\doc\finalis-core"
+$installerAssetsDir = Join-Path $resolvedStageRoot "installer-assets"
 $qtDeployExe = Join-Path $QtRootDir "bin\windeployqt.exe"
 $vcpkgBinCandidates = @()
 if ($VcpkgInstalledDir) {
@@ -59,6 +81,7 @@ if (Test-Path $StageRoot) {
 
 New-Item -ItemType Directory -Force -Path $resolvedStageRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $installerAssetsDir | Out-Null
 
 cmake --install $resolvedBuildDir --config $Configuration --prefix $installRoot
 
@@ -82,6 +105,8 @@ foreach ($candidate in ($vcpkgBinCandidates | Select-Object -Unique)) {
 
 Copy-OptionalFile -Source (Join-Path $repoRoot "branding\finalis-app-icon.png") -Destination (Join-Path $installRoot "finalis-app-icon.png")
 Copy-OptionalFile -Source (Join-Path $repoRoot "branding\finalis-logo-horizontal.png") -Destination (Join-Path $installRoot "finalis-logo-horizontal.png")
+Convert-PngToBmp -Source (Join-Path $repoRoot "branding\finalis-splash-lockup.png") -Destination (Join-Path $installerAssetsDir "finalis-wizard.bmp")
+Convert-PngToBmp -Source (Join-Path $repoRoot "branding\finalis-logo-horizontal.png") -Destination (Join-Path $installerAssetsDir "finalis-wizard-small.bmp")
 
 $launcherReadme = @"
 Finalis Core for Windows
