@@ -40,6 +40,14 @@ $docsDir = Join-Path $installRoot "share\doc\finalis-core"
 $qtDeployExe = Join-Path $QtRootDir "bin\windeployqt.exe"
 $vcpkgBinDir = Join-Path $VcpkgInstalledDir "bin"
 
+if (-not (Test-Path $qtDeployExe) -and (Test-Path $QtRootDir)) {
+    $qtDeployCandidate = Get-ChildItem -Path $QtRootDir -Filter windeployqt.exe -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($qtDeployCandidate) {
+        $qtDeployExe = $qtDeployCandidate.FullName
+    }
+}
+
 if (Test-Path $StageRoot) {
     Remove-Item -Recurse -Force $StageRoot
 }

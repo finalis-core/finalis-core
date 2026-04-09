@@ -62,8 +62,13 @@ jobs:
           } else {
             $version = "0.7.0-${{ github.run_number }}"
           }
+          $qtDeploy = Get-ChildItem -Path "${{ github.workspace }}\.qt" -Filter windeployqt.exe -Recurse | Select-Object -First 1
+          if (-not $qtDeploy) {
+            throw "windeployqt.exe not found under ${{ github.workspace }}\.qt"
+          }
+          $qtRoot = Split-Path (Split-Path $qtDeploy.FullName -Parent) -Parent
           "version=$version" >> $env:GITHUB_OUTPUT
-          "FINALIS_QT_PREFIX=${{ github.workspace }}\.qt\${{ env.QT_VERSION }}\${{ env.QT_ARCH }}" >> $env:GITHUB_ENV
+          "FINALIS_QT_PREFIX=$qtRoot" >> $env:GITHUB_ENV
           "VCPKG_ROOT=${{ github.workspace }}\vcpkg" >> $env:GITHUB_ENV
 
       - name: Configure
