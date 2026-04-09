@@ -1,18 +1,30 @@
 [CmdletBinding()]
 param(
-    [string]$DataDir = "$env:LOCALAPPDATA\Finalis\mainnet",
+    [string]$DataDir = "",
     [int]$P2PPort = 19440,
     [int]$LightserverPort = 19444,
     [int]$ExplorerPort = 18080,
     [string]$LightserverBind = "127.0.0.1",
     [string]$ExplorerBind = "127.0.0.1",
     [bool]$WithExplorer = $true,
+    [switch]$ConfigureFirewall,
+    [switch]$NoStart,
     [switch]$PublicNode,
     [ValidateSet("auto", "bootstrap", "joiner")]
     [string]$NodeRole = "auto"
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($DataDir)) {
+    if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
+        $DataDir = Join-Path $env:APPDATA ".finalis\mainnet"
+    } elseif (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+        $DataDir = Join-Path $env:USERPROFILE ".finalis\mainnet"
+    } else {
+        $DataDir = ".finalis\mainnet"
+    }
+}
 
 $appRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $binDir = Join-Path $appRoot "bin"
@@ -23,9 +35,59 @@ $logDir = Join-Path $DataDir "logs"
 
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $DataDir "keystore") | Out-Null
 
 if (-not (Test-Path $nodeExe)) {
     throw "finalis-node.exe not found at $nodeExe"
+}
+
+function Ensure-FirewallRule {
+    param(
+        [string]$DisplayName,
+        [int]$Port,
+        [string]$ProgramPath
+    )
+
+    $existing = Get-NetFirewallRule -DisplayName $DisplayName -ErrorAction SilentlyContinue
+    if ($existing) {
+        return
+    }
+
+    $params = @{
+        DisplayName = $DisplayName
+        Direction   = "Inbound"
+        Action      = "Allow"
+        Enabled     = "True"
+        Profile     = "Any"
+        Protocol    = "TCP"
+        LocalPort   = $Port
+    }
+    if ($ProgramPath -and (Test-Path $ProgramPath)) {
+        $params["Program"] = $ProgramPath
+    }
+    New-NetFirewallRule @params | Out-Null
+}
+
+function Ensure-FinalisFirewallRules {
+    try {
+        Ensure-FirewallRule -DisplayName "Finalis P2P ($P2PPort)" -Port $P2PPort -ProgramPath $nodeExe
+        Ensure-FirewallRule -DisplayName "Finalis Lightserver RPC ($LightserverPort)" -Port $LightserverPort -ProgramPath $nodeExe
+        if ($WithExplorer -and (Test-Path $explorerExe)) {
+            Ensure-FirewallRule -DisplayName "Finalis Explorer ($ExplorerPort)" -Port $ExplorerPort -ProgramPath $explorerExe
+        }
+    } catch {
+        Write-Warning "Firewall rule setup failed: $($_.Exception.Message)"
+    }
+}
+
+if ($ConfigureFirewall.IsPresent) {
+    Ensure-FinalisFirewallRules
+}
+
+if ($NoStart.IsPresent) {
+    Write-Host "Finalis firewall configuration complete."
+    Write-Host "Data dir: $DataDir"
+    exit 0
 }
 
 $nodeArgs = @(
@@ -64,6 +126,8 @@ if ((Test-Path $seedsJson) -and $NodeRole -ne "bootstrap") {
         }
     }
 }
+
+Ensure-FinalisFirewallRules
 
 $nodeLog = Join-Path $logDir "node.log"
 $nodeErr = Join-Path $logDir "node.err.log"

@@ -2,16 +2,42 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <string>
 #include <system_error>
 
 namespace finalis {
+namespace {
+
+std::string getenv_string(const char* name) {
+  if (!name) return {};
+  const char* value = std::getenv(name);
+  if (!value) return {};
+  return value;
+}
+
+std::string preferred_user_root() {
+#ifdef _WIN32
+  std::string appdata = getenv_string("APPDATA");
+  if (!appdata.empty()) return appdata;
+
+  std::string userprofile = getenv_string("USERPROFILE");
+  if (!userprofile.empty()) return userprofile;
+
+  std::string homedrive = getenv_string("HOMEDRIVE");
+  std::string homepath = getenv_string("HOMEPATH");
+  if (!homedrive.empty() && !homepath.empty()) return homedrive + homepath;
+#endif
+  return getenv_string("HOME");
+}
+
+}  // namespace
 
 std::string expand_user_home(const std::string& path) {
   if (path.empty() || path[0] != '~') return path;
-  const char* home = std::getenv("HOME");
-  if (!home || std::string(home).empty()) return path;
-  if (path == "~") return std::string(home);
-  if (path.size() > 1 && path[1] == '/') return std::string(home) + path.substr(1);
+  const std::string home = preferred_user_root();
+  if (home.empty()) return path;
+  if (path == "~") return home;
+  if (path.size() > 1 && (path[1] == '/' || path[1] == '\\')) return home + path.substr(1);
   return path;
 }
 

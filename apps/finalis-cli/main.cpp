@@ -909,7 +909,7 @@ int main(int argc, char** argv) {
     return 0;
   }
   if (cmd == "--print-logs" || cmd == "print_logs") {
-    std::string db_path = ".finalis/mainnet";
+    std::string db_path = default_mainnet_db_path();
     std::string service_name = "finalis";
     std::size_t tail = 20;
     for (int i = 2; i < argc; ++i) {
@@ -1072,7 +1072,7 @@ int main(int argc, char** argv) {
   }
 
   if (cmd == "slash_records") {
-    std::string db_path = ".finalis/mainnet";
+    std::string db_path = default_mainnet_db_path();
     std::size_t tail = 20;
     for (int i = 2; i < argc; ++i) {
       std::string a = argv[i];
@@ -1112,7 +1112,7 @@ int main(int argc, char** argv) {
   }
 
   if (cmd == "epoch_tickets" || cmd == "epoch_best" || cmd == "epoch_committee" || cmd == "epoch_state") {
-    std::string db_path = ".finalis/mainnet";
+    std::string db_path = default_mainnet_db_path();
     std::optional<std::uint64_t> epoch;
     for (int i = 2; i < argc; ++i) {
       std::string a = argv[i];
@@ -1227,7 +1227,7 @@ int main(int argc, char** argv) {
   }
 
   if (cmd == "tip") {
-    std::string db_path = ".finalis/mainnet";
+    std::string db_path = default_mainnet_db_path();
     for (int i = 2; i < argc; ++i) {
       std::string a = argv[i];
       if (a == "--db" && i + 1 < argc) db_path = argv[++i];
@@ -1248,7 +1248,7 @@ int main(int argc, char** argv) {
   }
 
   if (cmd == "snapshot_export") {
-    std::string db_path = ".finalis/mainnet";
+    std::string db_path = default_mainnet_db_path();
     std::string out_path;
     for (int i = 2; i < argc; ++i) {
       std::string a = argv[i];
@@ -1280,7 +1280,7 @@ int main(int argc, char** argv) {
   }
 
   if (cmd == "snapshot_import") {
-    std::string db_path = ".finalis/mainnet";
+    std::string db_path = default_mainnet_db_path();
     std::string in_path;
     for (int i = 2; i < argc; ++i) {
       std::string a = argv[i];
@@ -3053,7 +3053,7 @@ int main(int argc, char** argv) {
   }
 
   if (cmd == "mint_deposit_status") {
-    std::string db_path = ".finalis/mainnet";
+    std::string db_path = default_mainnet_db_path();
     std::string mint_id_hex;
     std::string recipient_addr;
     std::size_t tail = 20;

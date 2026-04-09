@@ -56,7 +56,7 @@ struct NodeConfig {
   std::uint16_t lightserver_port{19444};
   std::vector<std::string> peers;
   std::vector<std::string> seeds;
-  std::string db_path{".finalis/mainnet"};
+  std::string db_path{"~/.finalis/mainnet"};
   std::string genesis_path;
   bool disable_p2p{false};
   bool log_json{false};

@@ -19,7 +19,7 @@ struct Config {
   NetworkConfig network{mainnet_network()};
   std::string bind_ip{"127.0.0.1"};
   std::uint16_t port{0};
-  std::string db_path{".finalis/mainnet"};
+  std::string db_path{"~/.finalis/mainnet"};
   std::size_t max_committee{MAX_COMMITTEE};
   std::string tx_relay_host{"127.0.0.1"};
   std::uint16_t tx_relay_port{0};
