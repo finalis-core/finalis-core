@@ -18,6 +18,32 @@ namespace finalis::storage {
 
 namespace {
 
+#ifdef SC_HAS_ROCKSDB
+rocksdb::Status open_rocksdb_rw(const rocksdb::Options& options, const std::string& path,
+                                std::unique_ptr<rocksdb::DB>* out) {
+#ifdef _WIN32
+  return rocksdb::DB::Open(options, path, out);
+#else
+  rocksdb::DB* raw = nullptr;
+  auto status = rocksdb::DB::Open(options, path, &raw);
+  if (status.ok()) out->reset(raw);
+  return status;
+#endif
+}
+
+rocksdb::Status open_rocksdb_ro(const rocksdb::Options& options, const std::string& path,
+                                std::unique_ptr<rocksdb::DB>* out) {
+#ifdef _WIN32
+  return rocksdb::DB::OpenForReadOnly(options, path, out);
+#else
+  rocksdb::DB* raw = nullptr;
+  auto status = rocksdb::DB::OpenForReadOnly(options, path, &raw);
+  if (status.ok()) out->reset(raw);
+  return status;
+#endif
+}
+#endif
+
 Bytes serialize_tip(const TipState& tip) {
   codec::ByteWriter w;
   w.u64le(tip.height);
@@ -1138,10 +1164,10 @@ bool DB::open(const std::string& path) {
   rocks_ = std::make_unique<RocksImpl>();
   rocksdb::Options options;
   options.create_if_missing = true;
-  rocksdb::DB* raw = nullptr;
-  auto s = rocksdb::DB::Open(options, path_, &raw);
+  std::unique_ptr<rocksdb::DB> raw;
+  auto s = open_rocksdb_rw(options, path_, &raw);
   if (!s.ok()) return false;
-  rocks_->db.reset(raw);
+  rocks_->db = std::move(raw);
   return true;
 #else
   std::error_code ec;
@@ -1160,10 +1186,10 @@ bool DB::open_readonly(const std::string& path) {
   rocks_ = std::make_unique<RocksImpl>();
   rocksdb::Options options;
   options.create_if_missing = false;
-  rocksdb::DB* raw = nullptr;
-  auto s = rocksdb::DB::OpenForReadOnly(options, path_, &raw);
+  std::unique_ptr<rocksdb::DB> raw;
+  auto s = open_rocksdb_ro(options, path_, &raw);
   if (!s.ok()) return false;
-  rocks_->db.reset(raw);
+  rocks_->db = std::move(raw);
   return true;
 #else
   std::error_code ec;
