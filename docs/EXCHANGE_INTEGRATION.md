@@ -57,6 +57,7 @@ Core methods:
 - `get_status`
 - `validate_address`
 - `get_history_page`
+- `get_history_page_detailed`
 - `get_utxos`
 - `get_tx_status`
 - `get_tx`
@@ -87,6 +88,7 @@ Important live fields:
 - `network_name`
 - `network_id`
 - `genesis_hash`
+- `protocol_version`
 - `version`
 - `wallet_api_version`
 - `tip.height`
@@ -97,6 +99,9 @@ Important live fields:
 - `finalized_transition_hash`
 - `sync.mode = "finalized_only"`
 - `healthy_peer_count`
+- `established_peer_count`
+- `observed_network_finalized_height`
+- `finalized_lag`
 - `bootstrap_sync_incomplete`
 - `peer_height_disagreement`
 
@@ -122,8 +127,8 @@ If two endpoints report the same finalized height but different
 Recommended deposit flow:
 
 1. validate deposit addresses with `validate_address`
-2. store `scripthash_hex`
-3. poll `get_history_page` and/or `get_tx_status`
+2. store returned `scripthash_hex`
+3. poll `get_history_page`, `get_history_page_detailed`, and/or `get_tx_status`
 4. when a deposit transaction is finalized, validate the credited output
 5. credit exactly once
 
@@ -136,6 +141,7 @@ Canonical credit rule:
 Equivalent finalized-history rule:
 
 - finalized transaction appears in `get_history_page`
+- or `get_history_page_detailed`
 - exchange validates the expected output from `get_tx`
 
 Do not credit from:
@@ -167,7 +173,10 @@ Interpretation of `broadcast_tx`:
 
 ## 7. Address and Wallet Reconciliation
 
-Use `get_history_page` for deterministic paging and replay-safe history scans.
+Use `get_history_page` for deterministic finalized paging.
+
+Use `get_history_page_detailed` when the integration wants direction and net
+amount context from finalized history expansion.
 
 Use `get_utxos` for:
 
@@ -247,7 +256,7 @@ Action:
 For exchanges, the authoritative settlement contract is:
 
 - `get_status` for identity and finalized-tip health
-- `get_history_page` for finalized deposit discovery
+- `get_history_page` / `get_history_page_detailed` for finalized deposit discovery
 - `get_tx_status` for finalized transaction state
 - `get_tx` for finalized payload inspection
 - `get_utxos` for finalized exchange-controlled wallet state

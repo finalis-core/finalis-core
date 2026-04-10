@@ -305,6 +305,27 @@ struct TxSummaryRow {
   std::string flow_summary{"Multi-input or multi-recipient finalized transaction"};
 };
 
+std::optional<Bytes> canonical_transition_bytes_by_height(const storage::DB& db, std::uint64_t height,
+                                                          Hash32* transition_hash_out);
+
+std::vector<Hash32> canonical_transition_txids(const storage::DB& db, std::uint64_t height) {
+  auto transition_bytes = canonical_transition_bytes_by_height(db, height, nullptr);
+  if (!transition_bytes.has_value()) return {};
+  auto transition = FrontierTransition::parse(*transition_bytes);
+  if (!transition.has_value()) return {};
+  std::vector<Hash32> txids;
+  if (transition->next_frontier < transition->prev_frontier) return txids;
+  txids.reserve(static_cast<std::size_t>(transition->next_frontier - transition->prev_frontier));
+  for (std::uint64_t seq = transition->prev_frontier + 1; seq <= transition->next_frontier; ++seq) {
+    auto tx_bytes = db.get_ingress_record(seq);
+    if (!tx_bytes.has_value()) continue;
+    auto tx = Tx::parse(*tx_bytes);
+    if (!tx.has_value()) continue;
+    txids.push_back(tx->txid());
+  }
+  return txids;
+}
+
 std::vector<TxSummaryRow> build_tx_summary_rows(const storage::DB& db, const NetworkConfig& network,
                                                 const std::vector<Hash32>& txids) {
   std::vector<TxSummaryRow> out;
@@ -398,6 +419,26 @@ std::vector<TxSummaryRow> build_tx_summary_rows(const storage::DB& db, const Net
     out.push_back(std::move(row));
   }
   return out;
+}
+
+std::vector<TxSummaryRow> build_recent_tx_summary_rows(const storage::DB& db, const NetworkConfig& network,
+                                                       std::size_t max_items, std::uint64_t depth_window) {
+  std::vector<TxSummaryRow> out;
+  if (max_items == 0) return out;
+  const auto tip = db.get_tip();
+  if (!tip.has_value()) return out;
+  const std::uint64_t start_height = tip->height > depth_window ? tip->height - depth_window : 0;
+  std::vector<Hash32> txids;
+  txids.reserve(max_items);
+  for (std::uint64_t h = tip->height + 1; h-- > start_height && txids.size() < max_items;) {
+    const auto transition_txids = canonical_transition_txids(db, h);
+    for (const auto& txid : transition_txids) {
+      if (txids.size() >= max_items) break;
+      txids.push_back(txid);
+    }
+    if (h == 0) break;
+  }
+  return build_tx_summary_rows(db, network, txids);
 }
 
 std::string tx_summaries_json(const std::vector<TxSummaryRow>& rows) {
@@ -2100,6 +2141,14 @@ std::string Server::handle_rpc_body(const std::string& body) {
       txids.push_back(*parsed);
     }
     return make_result(id, tx_summaries_json(build_tx_summary_rows(*view, cfg_.network, txids)));
+  }
+
+  if (*method == "get_recent_tx_summaries") {
+    const std::uint64_t limit = field_u64(params, "limit").value_or(8);
+    const std::uint64_t depth_window = field_u64(params, "depth_window").value_or(32);
+    if (limit == 0) return make_result(id, "{\"items\":[]}");
+    return make_result(id, tx_summaries_json(build_recent_tx_summary_rows(
+                               *view, cfg_.network, static_cast<std::size_t>(limit), depth_window)));
   }
 
   if (*method == "validator_onboarding_status") {

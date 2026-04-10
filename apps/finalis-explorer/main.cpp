@@ -1904,78 +1904,110 @@ std::vector<RecentTxResult> fetch_recent_tx_results(const Config& cfg, std::size
 
   std::vector<RecentTxResult> out;
   if (max_items == 0) return out;
-  auto status = fetch_status_result(cfg);
-  if (!status.value.has_value()) return out;
-  const auto tip = status.value->finalized_height;
   const std::uint64_t depth_window = 32;
-  const std::uint64_t start_height = tip > depth_window ? tip - depth_window : 0;
-  std::vector<std::pair<std::string, std::uint64_t>> tx_refs;
-  for (std::uint64_t h = tip + 1; h-- > start_height && out.size() < max_items;) {
-    std::string err;
-    std::string transition_hash_hex;
-    auto transition = fetch_transition_by_height(cfg, h, &transition_hash_hex, &err);
-    if (!transition.has_value()) continue;
-    const auto txids = fetch_transition_txids(cfg, *transition);
-    for (const auto& txid : txids) {
-      if (tx_refs.size() >= max_items) break;
-      tx_refs.push_back({txid, h});
-    }
-    if (h == 0) break;
-  }
-  std::vector<std::string> txids;
-  txids.reserve(tx_refs.size());
-  for (const auto& [txid, _] : tx_refs) txids.push_back(txid);
-  const auto summaries = fetch_tx_summary_batch(cfg, txids);
-  out.reserve(tx_refs.size());
-  for (const auto& [txid, height] : tx_refs) {
-    RecentTxResult item;
-    item.txid = txid;
-    item.height = height;
-    auto it = summaries.find(txid);
-    if (it != summaries.end()) {
-      item.status_label = it->second.status_label;
-      item.credit_safe = it->second.credit_safe;
-      item.total_out = it->second.total_out;
-      item.input_count = it->second.input_count;
-      item.output_count = it->second.output_count;
-      item.fee = it->second.fee;
-      item.primary_sender = it->second.primary_sender;
-      item.primary_recipient = it->second.primary_recipient;
-      item.recipient_count = it->second.recipient_count;
-      item.flow_kind = it->second.flow_kind;
-      item.flow_summary = it->second.flow_summary;
-    } else {
-      auto tx_lookup = fetch_tx_result(cfg, txid);
-      if (tx_lookup.value.has_value()) {
-        item.status_label = tx_lookup.value->status_label;
-        item.credit_safe = tx_lookup.value->credit_safe;
-        item.timestamp = tx_lookup.value->timestamp;
-        item.total_out = tx_lookup.value->total_out;
-        item.input_count = tx_lookup.value->inputs.size();
-        item.output_count = tx_lookup.value->outputs.size();
-        item.fee = tx_lookup.value->fee;
-        if (!tx_lookup.value->outputs.empty()) {
-          std::set<std::string> unique_recipients;
-          for (const auto& out_view : tx_lookup.value->outputs) {
-            if (out_view.address.has_value() && !out_view.address->empty()) unique_recipients.insert(*out_view.address);
-          }
-          if (!unique_recipients.empty()) {
-            item.primary_recipient = *unique_recipients.begin();
-            item.recipient_count = unique_recipients.size();
-          }
+  {
+    std::ostringstream params;
+    params << "{\"limit\":" << max_items << ",\"depth_window\":" << depth_window << "}";
+    auto res = rpc_call(cfg.rpc_url, "get_recent_tx_summaries", params.str());
+    if (res.result.has_value() && res.result->is_object()) {
+      if (const auto* items = res.result->get("items"); items && items->is_array()) {
+        out.reserve(items->array_value.size());
+        for (const auto& item_value : items->array_value) {
+          if (!item_value.is_object()) continue;
+          auto txid = object_string(&item_value, "txid");
+          if (!txid.has_value()) continue;
+          RecentTxResult item;
+          item.txid = *txid;
+          item.height = object_u64(&item_value, "height");
+          item.total_out = object_u64(&item_value, "finalized_out");
+          item.status_label = object_string(&item_value, "status_label");
+          item.credit_safe = object_bool(&item_value, "credit_safe");
+          if (auto count = object_u64(&item_value, "input_count"); count.has_value()) item.input_count = static_cast<std::size_t>(*count);
+          if (auto count = object_u64(&item_value, "output_count"); count.has_value()) item.output_count = static_cast<std::size_t>(*count);
+          item.fee = object_u64(&item_value, "fee");
+          item.primary_sender = object_string(&item_value, "primary_sender");
+          item.primary_recipient = object_string(&item_value, "primary_recipient");
+          if (auto count = object_u64(&item_value, "recipient_count"); count.has_value()) item.recipient_count = static_cast<std::size_t>(*count);
+          item.flow_kind = object_string(&item_value, "flow_kind");
+          item.flow_summary = object_string(&item_value, "flow_summary");
+          out.push_back(std::move(item));
         }
-        if (!tx_lookup.value->inputs.empty()) {
-          const auto& first_input = tx_lookup.value->inputs.front();
-          auto prev_lookup = fetch_tx_result(cfg, first_input.prev_txid);
-          if (prev_lookup.value.has_value() && first_input.vout < prev_lookup.value->outputs.size()) {
-            item.primary_sender = prev_lookup.value->outputs[first_input.vout].address;
-          }
-        }
-        item.flow_kind = tx_lookup.value->flow_kind;
-        item.flow_summary = tx_lookup.value->flow_summary;
       }
     }
-    out.push_back(std::move(item));
+  }
+  if (out.empty()) {
+    auto status = fetch_status_result(cfg);
+    if (!status.value.has_value()) return out;
+    const auto tip = status.value->finalized_height;
+    const std::uint64_t start_height = tip > depth_window ? tip - depth_window : 0;
+    std::vector<std::pair<std::string, std::uint64_t>> tx_refs;
+    for (std::uint64_t h = tip + 1; h-- > start_height && out.size() < max_items;) {
+      std::string err;
+      std::string transition_hash_hex;
+      auto transition = fetch_transition_by_height(cfg, h, &transition_hash_hex, &err);
+      if (!transition.has_value()) continue;
+      const auto txids = fetch_transition_txids(cfg, *transition);
+      for (const auto& txid : txids) {
+        if (tx_refs.size() >= max_items) break;
+        tx_refs.push_back({txid, h});
+      }
+      if (h == 0) break;
+    }
+    std::vector<std::string> txids;
+    txids.reserve(tx_refs.size());
+    for (const auto& [txid, _] : tx_refs) txids.push_back(txid);
+    const auto summaries = fetch_tx_summary_batch(cfg, txids);
+    out.reserve(tx_refs.size());
+    for (const auto& [txid, height] : tx_refs) {
+      RecentTxResult item;
+      item.txid = txid;
+      item.height = height;
+      auto it = summaries.find(txid);
+      if (it != summaries.end()) {
+        item.status_label = it->second.status_label;
+        item.credit_safe = it->second.credit_safe;
+        item.total_out = it->second.total_out;
+        item.input_count = it->second.input_count;
+        item.output_count = it->second.output_count;
+        item.fee = it->second.fee;
+        item.primary_sender = it->second.primary_sender;
+        item.primary_recipient = it->second.primary_recipient;
+        item.recipient_count = it->second.recipient_count;
+        item.flow_kind = it->second.flow_kind;
+        item.flow_summary = it->second.flow_summary;
+      } else {
+        auto tx_lookup = fetch_tx_result(cfg, txid);
+        if (tx_lookup.value.has_value()) {
+          item.status_label = tx_lookup.value->status_label;
+          item.credit_safe = tx_lookup.value->credit_safe;
+          item.timestamp = tx_lookup.value->timestamp;
+          item.total_out = tx_lookup.value->total_out;
+          item.input_count = tx_lookup.value->inputs.size();
+          item.output_count = tx_lookup.value->outputs.size();
+          item.fee = tx_lookup.value->fee;
+          if (!tx_lookup.value->outputs.empty()) {
+            std::set<std::string> unique_recipients;
+            for (const auto& out_view : tx_lookup.value->outputs) {
+              if (out_view.address.has_value() && !out_view.address->empty()) unique_recipients.insert(*out_view.address);
+            }
+            if (!unique_recipients.empty()) {
+              item.primary_recipient = *unique_recipients.begin();
+              item.recipient_count = unique_recipients.size();
+            }
+          }
+          if (!tx_lookup.value->inputs.empty()) {
+            const auto& first_input = tx_lookup.value->inputs.front();
+            auto prev_lookup = fetch_tx_result(cfg, first_input.prev_txid);
+            if (prev_lookup.value.has_value() && first_input.vout < prev_lookup.value->outputs.size()) {
+              item.primary_sender = prev_lookup.value->outputs[first_input.vout].address;
+            }
+          }
+          item.flow_kind = tx_lookup.value->flow_kind;
+          item.flow_summary = tx_lookup.value->flow_summary;
+        }
+      }
+      out.push_back(std::move(item));
+    }
   }
   {
     std::lock_guard<std::mutex> guard(g_recent_tx_cache_mu);

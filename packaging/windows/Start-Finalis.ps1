@@ -158,7 +158,7 @@ Stop-FinalisProcessIfRunning -ProcessName "finalis-node"
 
 $nodeLog = Join-Path $logDir "node.log"
 $nodeErr = Join-Path $logDir "node.err.log"
-Start-Process -FilePath $nodeExe -ArgumentList $nodeArgs -WorkingDirectory $appRoot -RedirectStandardOutput $nodeLog -RedirectStandardError $nodeErr | Out-Null
+$nodeProc = Start-Process -FilePath $nodeExe -ArgumentList $nodeArgs -WorkingDirectory $appRoot -RedirectStandardOutput $nodeLog -RedirectStandardError $nodeErr -PassThru
 
 $lightserverArgs = @(
     "--db", $DataDir,
@@ -169,10 +169,13 @@ $lightserverArgs = @(
 )
 $lightserverLog = Join-Path $logDir "lightserver.log"
 $lightserverErr = Join-Path $logDir "lightserver.err.log"
-Start-Process -FilePath $lightserverExe -ArgumentList $lightserverArgs -WorkingDirectory $appRoot -RedirectStandardOutput $lightserverLog -RedirectStandardError $lightserverErr | Out-Null
+$lightserverProc = Start-Process -FilePath $lightserverExe -ArgumentList $lightserverArgs -WorkingDirectory $appRoot -RedirectStandardOutput $lightserverLog -RedirectStandardError $lightserverErr -PassThru
 
 if (-not (Wait-ForTcpPort -Host "127.0.0.1" -Port $LightserverPort -TimeoutSeconds 15)) {
-    throw "finalis-lightserver.exe did not start listening on 127.0.0.1:$LightserverPort"
+    if ($lightserverProc.HasExited) {
+        throw "finalis-lightserver.exe exited before listening on 127.0.0.1:$LightserverPort. See $lightserverErr"
+    }
+    throw "finalis-lightserver.exe did not start listening on 127.0.0.1:$LightserverPort. See $lightserverErr"
 }
 
 if ($WithExplorer -and (Test-Path $explorerExe)) {
@@ -183,12 +186,18 @@ if ($WithExplorer -and (Test-Path $explorerExe)) {
     )
     $explorerLog = Join-Path $logDir "explorer.log"
     $explorerErr = Join-Path $logDir "explorer.err.log"
-    Start-Process -FilePath $explorerExe -ArgumentList $explorerArgs -WorkingDirectory $appRoot -RedirectStandardOutput $explorerLog -RedirectStandardError $explorerErr | Out-Null
+    $explorerProc = Start-Process -FilePath $explorerExe -ArgumentList $explorerArgs -WorkingDirectory $appRoot -RedirectStandardOutput $explorerLog -RedirectStandardError $explorerErr -PassThru
+    if (-not (Wait-ForTcpPort -Host "127.0.0.1" -Port $ExplorerPort -TimeoutSeconds 20)) {
+        if ($explorerProc.HasExited) {
+            throw "finalis-explorer.exe exited before listening on 127.0.0.1:$ExplorerPort. See $explorerErr"
+        }
+        throw "finalis-explorer.exe did not start listening on 127.0.0.1:$ExplorerPort. See $explorerErr"
+    }
 }
 
 Write-Host "Finalis node started."
 Write-Host "Data dir: $DataDir"
-Write-Host "Lightserver RPC: http://$LightserverBind`:$LightserverPort/rpc"
+Write-Host "Lightserver RPC: http://127.0.0.1:$LightserverPort/rpc"
 if ($WithExplorer -and (Test-Path $explorerExe)) {
-    Write-Host "Explorer: http://$ExplorerBind`:$ExplorerPort"
+    Write-Host "Explorer: http://127.0.0.1:$ExplorerPort"
 }

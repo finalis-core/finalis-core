@@ -221,6 +221,15 @@ std::string default_rpc_handler(const ExplorerFixture& fx, const std::string& bo
     }
     return rpc_result("{\"items\":[],\"has_more\":false,\"next_start_after\":{\"height\":99,\"txid\":\"deadbeef\"}}");
   }
+  if (body.find("\"method\":\"get_recent_tx_summaries\"") != std::string::npos) {
+    return rpc_result(std::string("{\"items\":[{\"txid\":\"") + fx.txid +
+                      "\",\"height\":7,\"status_label\":\"FINALIZED (CREDIT SAFE)\",\"credit_safe\":true,"
+                      "\"finalized_depth\":4,\"finalized_out\":123456789,\"total_out\":123456789,\"fee\":0,"
+                      "\"input_count\":1,\"output_count\":1,\"primary_sender\":null,"
+                      "\"primary_recipient\":\"" + fx.known_address +
+                      "\",\"recipient_count\":1,\"recipients\":[\"" + fx.known_address +
+                      "\"],\"flow_kind\":\"issuance\",\"flow_summary\":\"Protocol or settlement issuance\"}]}");
+  }
   return rpc_error(-32601, "unknown method");
 }
 
@@ -276,6 +285,9 @@ std::string no_recent_tx_rpc_handler(const ExplorerFixture& fx, const std::strin
   }
   if (body.find("\"method\":\"get_transition_by_height\"") != std::string::npos) {
     return rpc_error(-32001, "transition not found");
+  }
+  if (body.find("\"method\":\"get_recent_tx_summaries\"") != std::string::npos) {
+    return rpc_result("{\"items\":[]}");
   }
   return default_rpc_handler(fx, body);
 }
