@@ -632,6 +632,10 @@ std::optional<finalis::onboarding::ValidatorOnboardingRecord> rpc_onboarding_sta
   return finalis::lightserver::rpc_validator_onboarding_status(rpc_url, options, tracked_txid, err);
 }
 
+bool db_lock_error(const std::string& err) {
+  return err.find("database is locked") != std::string::npos || err.find("locked by the running finalis-node process") != std::string::npos;
+}
+
 std::string format_outpoint(const finalis::OutPoint& op) {
   return finalis::hex_encode32(op.txid) + ":" + std::to_string(op.index);
 }
@@ -810,7 +814,7 @@ void print_user_cli_help(std::ostream& os) {
      << "  finalis-cli economics_status [--db ~/.finalis/mainnet] [--file ~/.finalis/mainnet/keystore/validator.json] [--pass <pass>] [--height <n>] [--settlement-epoch-start <n>] [--json]\n"
      << "  finalis-cli validator-register [--db ~/.finalis/mainnet] [--file ~/.finalis/mainnet/keystore/validator.json] [--rpc <url>] [--pass <pass>] [--fee <u64>] [--timeout-seconds <n>] [--json] [--no-watch] [--no-wait-for-sync]\n"
      << "  finalis-cli validator-register-status [--db ~/.finalis/mainnet] [--file ~/.finalis/mainnet/keystore/validator.json] [--rpc <url>] [--pass <pass>] [--json]\n"
-     << "  finalis-cli validator-register-cancel [--db ~/.finalis/mainnet] [--file ~/.finalis/mainnet/keystore/validator.json] [--pass <pass>]\n"
+     << "  finalis-cli validator-register-cancel [--db ~/.finalis/mainnet] [--file ~/.finalis/mainnet/keystore/validator.json] [--rpc <url>] [--pass <pass>]\n"
      << "  finalis-cli wallet_create --out <path> [--pass <pass>] [--network mainnet] [--seed-hex <32b-hex>]\n"
      << "  finalis-cli wallet_import --out <path> --privkey <hex32> [--pass <pass>] [--network mainnet]\n"
      << "  finalis-cli wallet_address --file <path> [--pass <pass>]\n"
@@ -2534,6 +2538,35 @@ int main(int argc, char** argv) {
     }
     if (cmd == "validator-register-cancel") {
       if (!service.cancel(options, &err)) {
+        if (db_lock_error(err)) {
+          std::string status_err;
+          auto local_status = service.status(options, &status_err);
+          if (local_status) {
+            print_onboarding_record(*local_status, as_json);
+            const bool pre_broadcast_cancel =
+                finalis::onboarding::validator_onboarding_state_pre_broadcast(local_status->state) ||
+                (local_status->state == finalis::onboarding::ValidatorOnboardingState::BROADCASTING_JOIN_TX &&
+                 local_status->broadcast_outcome == finalis::onboarding::ValidatorOnboardingBroadcastOutcome::NONE);
+            if (pre_broadcast_cancel) {
+              std::cerr
+                  << "validator-register-cancel requires exclusive local DB access to release reserved inputs or cancel a pre-broadcast attempt. "
+                  << "Stop finalis-node and rerun this command.\n";
+            } else {
+              std::cerr
+                  << "validator-register-cancel could not detach the local onboarding record while finalis-node owns the DB. "
+                  << "The join attempt is already post-broadcast or on-chain tracked; use validator-register-status to monitor it, or stop finalis-node and rerun this command if you explicitly want to detach local tracking.\n";
+            }
+            return 1;
+          }
+          auto rpc_status = rpc_onboarding_status_with_local_tracking(rpc_url, options, &status_err);
+          if (rpc_status) {
+            print_onboarding_record(*rpc_status, as_json);
+            std::cerr
+                << "validator-register-cancel could not update local onboarding tracking while finalis-node owns the DB. "
+                << "Stop finalis-node and rerun this command if you need to detach the local record.\n";
+            return 1;
+          }
+        }
         std::cerr << "validator-register-cancel failed: " << err << "\n";
         return 1;
       }
