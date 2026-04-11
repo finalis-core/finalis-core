@@ -1473,8 +1473,9 @@ bool verify_frontier_record_against_state(const CanonicalDerivationConfig& cfg, 
   return true;
 }
 
-bool apply_frontier_record(const CanonicalDerivationConfig& cfg, const CanonicalDerivedState& prev,
-                           const CanonicalFrontierRecord& record, CanonicalDerivedState* out, std::string* error) {
+bool apply_frontier_record_impl(const CanonicalDerivationConfig& cfg, const CanonicalDerivedState& prev,
+                                const CanonicalFrontierRecord& record, bool recompute_state_commitment,
+                                CanonicalDerivedState* out, std::string* error) {
   if (!out) {
     if (error) *error = "missing-output";
     return false;
@@ -1528,9 +1529,14 @@ bool apply_frontier_record(const CanonicalDerivationConfig& cfg, const Canonical
     }
     next.finalized_committee_checkpoints[next_epoch_start] = checkpoint;
   }
-  next.state_commitment = consensus_state_commitment(cfg, next);
+  if (recompute_state_commitment) next.state_commitment = consensus_state_commitment(cfg, next);
   *out = std::move(next);
   return true;
+}
+
+bool apply_frontier_record(const CanonicalDerivationConfig& cfg, const CanonicalDerivedState& prev,
+                           const CanonicalFrontierRecord& record, CanonicalDerivedState* out, std::string* error) {
+  return apply_frontier_record_impl(cfg, prev, record, true, out, error);
 }
 
 bool derive_canonical_state_from_frontier_chain(const CanonicalDerivationConfig& cfg,
@@ -1540,9 +1546,10 @@ bool derive_canonical_state_from_frontier_chain(const CanonicalDerivationConfig&
   CanonicalDerivedState state = initial_state;
   for (const auto& record : chain) {
     CanonicalDerivedState next;
-    if (!apply_frontier_record(cfg, state, record, &next, error)) return false;
+    if (!apply_frontier_record_impl(cfg, state, record, false, &next, error)) return false;
     state = std::move(next);
   }
+  state.state_commitment = consensus_state_commitment(cfg, state);
   if (out) *out = std::move(state);
   return true;
 }
@@ -1592,10 +1599,11 @@ bool derive_canonical_state_from_frontier_storage(const CanonicalDerivationConfi
     CanonicalFrontierRecord record;
     if (!load_certified_frontier_record_from_storage(db, *transition, &record, error)) return false;
     CanonicalDerivedState next;
-    if (!apply_frontier_record(cfg, state, record, &next, error)) return false;
+    if (!apply_frontier_record_impl(cfg, state, record, false, &next, error)) return false;
     state = std::move(next);
   }
 
+  state.state_commitment = consensus_state_commitment(cfg, state);
   if (out) *out = std::move(state);
   return true;
 }
