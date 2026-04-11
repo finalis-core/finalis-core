@@ -522,6 +522,7 @@ class Node {
   std::map<Hash32, std::uint64_t> requested_sync_artifacts_;
   std::map<std::uint64_t, std::uint64_t> requested_sync_heights_;
   std::map<int, std::string> peer_ip_cache_;
+  std::map<int, bool> peer_inbound_cache_;
   std::map<int, std::uint64_t> peer_keepalive_ms_;
   std::map<std::string, std::uint64_t> invalid_frame_log_ms_;
   std::map<std::string, std::uint64_t> addr_drop_log_ms_;

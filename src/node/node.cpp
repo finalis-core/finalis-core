@@ -1745,6 +1745,7 @@ bool Node::init() {
         {
           std::lock_guard<std::mutex> lk(mu_);
           peer_ip_cache_[peer_id] = endpoint_to_ip(detail);
+          peer_inbound_cache_[peer_id] = p2p_.get_peer_info(peer_id).inbound;
           peer_keepalive_ms_[peer_id] = now_ms();
         }
         const auto info = p2p_.get_peer_info(peer_id);
@@ -1758,11 +1759,24 @@ bool Node::init() {
         return;
       }
       if (type == p2p::PeerManager::PeerEventType::DISCONNECTED) {
-        const auto info = p2p_.get_peer_info(peer_id);
-        log_line("peer-disconnected peer_id=" + std::to_string(peer_id) + " dir=" + (info.inbound ? "inbound" : "outbound") +
-                 " detail=" + detail);
         std::lock_guard<std::mutex> lk(mu_);
+        const bool inbound = [&]() {
+          auto it = peer_inbound_cache_.find(peer_id);
+          if (it != peer_inbound_cache_.end()) return it->second;
+          return false;
+        }();
+        log_line("peer-disconnected peer_id=" + std::to_string(peer_id) + " dir=" + (inbound ? "inbound" : "outbound") +
+                 " detail=" + detail);
+        const bool had_round_activity =
+            proposed_in_round_.find(std::make_pair(finalized_height_ + 1, current_round_)) != proposed_in_round_.end() ||
+            local_vote_reservations_.find(std::make_pair(finalized_height_ + 1, current_round_)) !=
+                local_vote_reservations_.end() ||
+            local_timeout_vote_reservations_.find(std::make_pair(finalized_height_ + 1, current_round_)) !=
+                local_timeout_vote_reservations_.end() ||
+            !votes_.participants_for(finalized_height_ + 1, current_round_).empty() ||
+            !timeout_votes_.signatures_for(finalized_height_ + 1, current_round_).empty();
         peer_ip_cache_.erase(peer_id);
+        peer_inbound_cache_.erase(peer_id);
         peer_keepalive_ms_.erase(peer_id);
         peer_validator_pubkeys_.erase(peer_id);
         peer_finalized_tips_.erase(peer_id);
@@ -1780,7 +1794,7 @@ bool Node::init() {
         }
         requested_sync_artifacts_.clear();
         requested_sync_heights_.clear();
-        if (established_peer_count() == 0) {
+        if (established_peer_count() == 0 && had_round_activity) {
           const auto current_height = finalized_height_ + 1;
           proposed_in_round_.clear();
           local_vote_reservations_.clear();
@@ -1831,7 +1845,10 @@ bool Node::init() {
           log_line("bootstrap-timeout peer_id=" + std::to_string(peer_id) + " ip=" + ip + " note=timeout");
           return;
         }
-        score_peer(peer_id, p2p::MisbehaviorReason::INVALID_FRAME, "timeout");
+        score_peer(peer_id, type == p2p::PeerManager::PeerEventType::HANDSHAKE_TIMEOUT
+                                ? p2p::MisbehaviorReason::HANDSHAKE_TIMEOUT
+                                : p2p::MisbehaviorReason::INVALID_FRAME,
+                   type == p2p::PeerManager::PeerEventType::HANDSHAKE_TIMEOUT ? "handshake-timeout" : "timeout");
       } else if (type == p2p::PeerManager::PeerEventType::QUEUE_OVERFLOW) {
         score_peer(peer_id, p2p::MisbehaviorReason::RATE_LIMIT, "queue-overflow");
       }

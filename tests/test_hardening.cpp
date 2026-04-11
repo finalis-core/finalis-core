@@ -35,6 +35,18 @@ TEST(test_peer_discipline_soft_mute_and_ban) {
   ASSERT_TRUE(!d.is_banned(ip, 1000));
 }
 
+TEST(test_peer_discipline_handshake_timeouts_do_not_trigger_invalid_frame_ban_window) {
+  p2p::PeerDiscipline d(30, 100, 60);
+  const std::string ip = "203.0.113.9";
+  for (std::uint64_t t = 100; t < 110; ++t) {
+    d.add_score(ip, p2p::MisbehaviorReason::HANDSHAKE_TIMEOUT, t);
+  }
+  const auto status = d.status(ip, 110);
+  ASSERT_TRUE(!status.soft_muted);
+  ASSERT_TRUE(!status.banned);
+  ASSERT_TRUE(status.score < 30);
+}
+
 TEST(test_recent_hash_cache_bounded_and_deduplicated) {
   p2p::RecentHashCache c(2);
   Hash32 a{};

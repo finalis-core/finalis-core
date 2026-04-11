@@ -32,6 +32,7 @@ class TokenBucket {
 
 enum class MisbehaviorReason {
   INVALID_FRAME,
+  HANDSHAKE_TIMEOUT,
   PRE_HANDSHAKE_CONSENSUS,
   INVALID_PAYLOAD,
   INVALID_INGRESS,

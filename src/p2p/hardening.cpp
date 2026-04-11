@@ -52,6 +52,8 @@ int PeerDiscipline::reason_score(MisbehaviorReason reason) const {
   switch (reason) {
     case MisbehaviorReason::INVALID_FRAME:
       return 35;
+    case MisbehaviorReason::HANDSHAKE_TIMEOUT:
+      return 1;
     case MisbehaviorReason::PRE_HANDSHAKE_CONSENSUS:
       return 20;
     case MisbehaviorReason::INVALID_PAYLOAD:
