@@ -1956,6 +1956,100 @@ TEST(test_bootstrap_availability_grace_does_not_relax_post_genesis_joiner_requir
   ASSERT_EQ(checkpoint.availability_min_eligible_operators, consensus::derive_adaptive_min_eligible(16));
 }
 
+TEST(test_bootstrap_handoff_complete_is_purely_derived_from_finalized_state) {
+  auto cfg = live_activation_cfg();
+  const auto bootstrap = key_from_byte(143);
+  const auto joiner = key_from_byte(144);
+
+  consensus::CanonicalGenesisState genesis;
+  genesis.genesis_artifact_id = zero_hash();
+  genesis.initial_validators.push_back(bootstrap.public_key);
+
+  consensus::CanonicalDerivedState state;
+  std::string err;
+  ASSERT_TRUE(consensus::build_genesis_canonical_state(cfg, genesis, &state, &err));
+  ASSERT_TRUE(!consensus::bootstrap_handoff_complete(state));
+
+  state.finalized_height = 1;
+  ASSERT_TRUE(!consensus::bootstrap_handoff_complete(state));
+
+  state.validators.set_rules(consensus::ValidatorRules{.min_bond = consensus::genesis_validator_bond_amount(),
+                                                       .warmup_blocks = 0,
+                                                       .cooldown_blocks = 0});
+  ASSERT_TRUE(state.validators.register_bond(joiner.public_key, OutPoint{Hash32{7}, 0}, 1,
+                                             consensus::genesis_validator_bond_amount(), &err, joiner.public_key));
+  state.validators.advance_height(state.finalized_height + 1);
+  ASSERT_TRUE(consensus::bootstrap_handoff_complete(state));
+}
+
+TEST(test_checkpoint_ticket_pow_fallback_member_uses_best_ticket_hash_and_nonce) {
+  storage::FinalizedCommitteeCheckpoint checkpoint;
+  const auto a = key_from_byte(145).public_key;
+  const auto b = key_from_byte(146).public_key;
+  const auto c = key_from_byte(147).public_key;
+  checkpoint.ordered_members = {a, b, c};
+
+  Hash32 ha{};
+  ha.fill(0x40);
+  Hash32 hb{};
+  hb.fill(0x10);
+  Hash32 hc{};
+  hc.fill(0x10);
+  checkpoint.ordered_ticket_hashes = {ha, hb, hc};
+  checkpoint.ordered_ticket_nonces = {9, 7, 11};
+
+  const auto fallback = consensus::checkpoint_ticket_pow_fallback_member(checkpoint);
+  ASSERT_TRUE(fallback.has_value());
+  ASSERT_EQ(*fallback, b);
+}
+
+TEST(test_round_one_ticket_pow_fallback_uses_single_best_ticket_member) {
+  auto cfg = live_activation_cfg();
+  const auto a = key_from_byte(148).public_key;
+  const auto b = key_from_byte(149).public_key;
+  const auto c = key_from_byte(150).public_key;
+
+  consensus::CanonicalGenesisState genesis;
+  genesis.genesis_artifact_id = zero_hash();
+  genesis.initial_validators = {a, b, c};
+
+  consensus::CanonicalDerivedState state;
+  std::string err;
+  ASSERT_TRUE(consensus::build_genesis_canonical_state(cfg, genesis, &state, &err));
+
+  auto checkpoint = state.finalized_committee_checkpoints.at(1);
+  checkpoint.ordered_members = {a, b, c};
+  Hash32 ha{};
+  ha.fill(0x30);
+  Hash32 hb{};
+  hb.fill(0x20);
+  Hash32 hc{};
+  hc.fill(0x10);
+  checkpoint.ordered_ticket_hashes = {ha, hb, hc};
+  checkpoint.ordered_ticket_nonces = {4, 3, 2};
+  state.finalized_committee_checkpoints[1] = checkpoint;
+
+  const auto round0 = consensus::canonical_committee_for_height_round(cfg, state, 1, 0);
+  ASSERT_EQ(round0, checkpoint.ordered_members);
+
+  const auto round1 = consensus::canonical_committee_for_height_round(cfg, state, 1, 1);
+  ASSERT_EQ(round1.size(), 1u);
+  ASSERT_EQ(round1.front(), c);
+
+  const auto round2 = consensus::canonical_committee_for_height_round(cfg, state, 1, 2);
+  ASSERT_EQ(round2.size(), 1u);
+  ASSERT_EQ(round2.front(), b);
+
+  const auto leader0 = consensus::canonical_leader_for_height_round(cfg, state, 1, 0);
+  ASSERT_TRUE(leader0.has_value());
+  const auto leader1 = consensus::canonical_leader_for_height_round(cfg, state, 1, 1);
+  ASSERT_TRUE(leader1.has_value());
+  ASSERT_EQ(*leader1, c);
+  const auto leader2 = consensus::canonical_leader_for_height_round(cfg, state, 1, 2);
+  ASSERT_TRUE(leader2.has_value());
+  ASSERT_EQ(*leader2, b);
+}
+
 TEST(test_live_validator_exit_mid_epoch_is_removed_only_at_next_epoch_checkpoint) {
   const auto cfg = live_activation_cfg();
   const auto bootstrap = key_from_byte(102);
