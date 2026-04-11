@@ -1265,6 +1265,26 @@ bool persist_canonical_cache_rows(storage::DB& db, const consensus::CanonicalDer
     if (!db.put_epoch_reward_settlement(reward_state)) return false;
   }
   if (!db.put_protocol_reserve_balance(state.protocol_reserve_balance_units)) return false;
+  std::set<std::uint64_t> desired_checkpoint_epochs;
+  for (const auto& [epoch, _] : state.finalized_committee_checkpoints) {
+    desired_checkpoint_epochs.insert(epoch);
+  }
+  std::vector<std::string> checkpoint_keys_to_erase;
+  for (const auto& [key, _] : db.scan_prefix("CE:")) {
+    const auto epoch_bytes = hex_decode(key.substr(3));
+    if (!epoch_bytes.has_value() || epoch_bytes->size() != sizeof(std::uint64_t)) {
+      checkpoint_keys_to_erase.push_back(key);
+      continue;
+    }
+    codec::ByteReader r(*epoch_bytes);
+    const auto epoch = r.u64le();
+    if (!epoch.has_value() || desired_checkpoint_epochs.find(*epoch) == desired_checkpoint_epochs.end()) {
+      checkpoint_keys_to_erase.push_back(key);
+    }
+  }
+  for (const auto& key : checkpoint_keys_to_erase) {
+    if (!db.erase(key)) return false;
+  }
   for (const auto& [epoch, checkpoint] : state.finalized_committee_checkpoints) {
     (void)epoch;
     if (!db.put_finalized_committee_checkpoint(checkpoint)) return false;
@@ -7143,48 +7163,7 @@ bool Node::load_state() {
   const auto persisted_checkpoints = db_.load_finalized_committee_checkpoints();
   if (!persisted_checkpoints.empty() &&
       !same_finalized_checkpoint_maps(persisted_checkpoints, derived_state.finalized_committee_checkpoints)) {
-    bool repairable_checkpoint_drift = stale_canonical_cache_tip;
-    bool unrepairable_checkpoint_drift = false;
-    if (!repairable_checkpoint_drift) {
-      for (const auto& [epoch_start, persisted_checkpoint] : persisted_checkpoints) {
-        auto derived_it = derived_state.finalized_committee_checkpoints.find(epoch_start);
-        if (derived_it == derived_state.finalized_committee_checkpoints.end() ||
-            same_finalized_checkpoint(persisted_checkpoint, derived_it->second)) {
-          continue;
-        }
-        if (!same_finalized_checkpoint_schedule_material(persisted_checkpoint, derived_it->second)) {
-          unrepairable_checkpoint_drift = true;
-          break;
-        }
-        if (epoch_start <= 1) {
-          unrepairable_checkpoint_drift = true;
-          break;
-        }
-        const auto best_tickets = db_.load_best_epoch_tickets(epoch_start);
-        if (best_tickets.empty() || derived_it->second.ordered_members.size() != derived_it->second.ordered_ticket_hashes.size() ||
-            derived_it->second.ordered_members.size() != derived_it->second.ordered_ticket_nonces.size()) {
-          unrepairable_checkpoint_drift = true;
-          break;
-        }
-        for (std::size_t i = 0; i < derived_it->second.ordered_members.size(); ++i) {
-          auto best_it = best_tickets.find(derived_it->second.ordered_members[i]);
-          if (best_it == best_tickets.end() || best_it->second.work_hash != derived_it->second.ordered_ticket_hashes[i] ||
-              best_it->second.nonce != derived_it->second.ordered_ticket_nonces[i]) {
-            unrepairable_checkpoint_drift = true;
-            break;
-          }
-        }
-        if (unrepairable_checkpoint_drift) break;
-        repairable_checkpoint_drift = true;
-      }
-    }
-    if (repairable_checkpoint_drift && !unrepairable_checkpoint_drift) {
-      log_line("canonical-cache-rewrite source=load-state-checkpoint-cache-mismatch");
-    } else {
-      log_line("finalized-state-invariant-violation source=load-state-checkpoint-cache-mismatch");
-      std::cerr << "load_state: checkpoint cache mismatch\n";
-      return false;
-    }
+    log_line("canonical-cache-rewrite source=load-state-checkpoint-cache-mismatch");
   }
   const auto persisted_rewards = db_.load_epoch_reward_settlements();
   if (!persisted_rewards.empty() && !same_epoch_reward_maps(persisted_rewards, derived_state.epoch_reward_states)) {
