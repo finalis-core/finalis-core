@@ -7133,11 +7133,13 @@ bool Node::load_state() {
   const bool stale_canonical_cache_tip =
       !persisted_commitment.has_value() || persisted_commitment->height != expected_commitment.height ||
       persisted_commitment->hash != expected_commitment.hash;
+  bool canonical_cache_rewrite_needed = stale_canonical_cache_tip;
 
   const auto persisted_utxos = db_.load_utxos();
   if (!persisted_utxos.empty() && !same_utxos(persisted_utxos, derived_state.utxos)) {
     if (using_frontier_replay) {
       log_line("canonical-cache-rewrite source=load-state-utxo-cache-mismatch");
+      canonical_cache_rewrite_needed = true;
     } else {
       log_line("finalized-state-invariant-violation source=load-state-utxo-cache-mismatch");
       std::cerr << "load_state: utxo cache mismatch\n";
@@ -7148,6 +7150,7 @@ bool Node::load_state() {
   if (!persisted_validators.empty() && !same_validator_maps(persisted_validators, derived_state.validators.all())) {
     if (stale_canonical_cache_tip) {
       log_line("canonical-cache-rewrite source=load-state-validator-cache-mismatch");
+      canonical_cache_rewrite_needed = true;
     } else {
       log_line("finalized-state-invariant-violation source=load-state-validator-cache-mismatch");
       std::cerr << "load_state: validator cache mismatch "
@@ -7159,20 +7162,24 @@ bool Node::load_state() {
   if (!persisted_join_requests.empty() &&
       !same_join_request_maps(persisted_join_requests, derived_state.validator_join_requests)) {
     log_line("canonical-cache-rewrite source=load-state-join-request-cache-mismatch");
+    canonical_cache_rewrite_needed = true;
   }
   const auto persisted_checkpoints = db_.load_finalized_committee_checkpoints();
   if (!persisted_checkpoints.empty() &&
       !same_finalized_checkpoint_maps(persisted_checkpoints, derived_state.finalized_committee_checkpoints)) {
     log_line("canonical-cache-rewrite source=load-state-checkpoint-cache-mismatch");
+    canonical_cache_rewrite_needed = true;
   }
   const auto persisted_rewards = db_.load_epoch_reward_settlements();
   if (!persisted_rewards.empty() && !same_epoch_reward_maps(persisted_rewards, derived_state.epoch_reward_states)) {
     log_line("canonical-cache-rewrite source=load-state-reward-cache-mismatch");
+    canonical_cache_rewrite_needed = true;
   }
   if (auto persisted_reserve = db_.get_protocol_reserve_balance(); persisted_reserve.has_value()) {
     if (*persisted_reserve != derived_state.protocol_reserve_balance_units) {
       if (stale_canonical_cache_tip) {
         log_line("canonical-cache-rewrite source=load-state-protocol-reserve-balance-mismatch");
+        canonical_cache_rewrite_needed = true;
       } else {
         log_line("finalized-state-invariant-violation source=load-state-protocol-reserve-balance-mismatch");
         std::cerr << "load_state: protocol reserve balance mismatch\n";
@@ -7184,14 +7191,19 @@ bool Node::load_state() {
     if (persisted_randomness->size() != 32 ||
         !std::equal(persisted_randomness->begin(), persisted_randomness->end(), derived_state.finalized_randomness.begin())) {
       log_line("canonical-cache-rewrite source=load-state-randomness-cache-mismatch");
+      canonical_cache_rewrite_needed = true;
     }
   }
 
   if (persisted_commitment.has_value()) {
-    if (!stale_canonical_cache_tip && !same_consensus_state_commitment_cache(*persisted_commitment, expected_commitment)) {
-      log_line("finalized-state-invariant-violation source=load-state-consensus-state-commitment-cache-mismatch");
-      std::cerr << "load_state: consensus state commitment cache mismatch\n";
-      return false;
+    if (!same_consensus_state_commitment_cache(*persisted_commitment, expected_commitment)) {
+      if (canonical_cache_rewrite_needed) {
+        log_line("canonical-cache-rewrite source=load-state-consensus-state-commitment-cache-mismatch");
+      } else {
+        log_line("finalized-state-invariant-violation source=load-state-consensus-state-commitment-cache-mismatch");
+        std::cerr << "load_state: consensus state commitment cache mismatch\n";
+        return false;
+      }
     }
   }
   if (using_frontier_replay) (void)db_.erase(storage::key_consensus_state_commitment_cache());
