@@ -3338,8 +3338,10 @@ bool Node::advance_round_for_test(std::uint64_t expected_height, std::uint32_t t
 
 bool Node::apply_finalized_frontier_effects_locked(const consensus::CanonicalFrontierRecord& record,
                                                    std::vector<FinalitySig> finality_signatures,
-                                                   bool clear_requested_sync) {
-  const auto committee = committee_for_height_round(record.transition.height, record.transition.round);
+                                                   bool clear_requested_sync,
+                                                   const std::vector<PubKey32>* effective_committee) {
+  const auto committee =
+      effective_committee != nullptr ? *effective_committee : committee_for_height_round(record.transition.height, record.transition.round);
   if (committee.empty()) return false;
   const std::size_t quorum = consensus::quorum_threshold(committee.size());
   const auto canonical_sigs = canonicalize_finality_signatures_locked(finality_signatures, quorum);
@@ -5878,15 +5880,7 @@ bool Node::handle_frontier_block_locked(const FrontierProposal& proposal,
                " reason=" + cert_error);
       return false;
     }
-    consensus::CanonicalFrontierRecord certified_record;
-    std::string frontier_record_error;
-    if (!consensus::load_certified_frontier_record_from_storage(db_, transition, &certified_record, &frontier_record_error)) {
-      log_line("frontier-block-reject height=" + std::to_string(transition.height) + " round=" +
-               std::to_string(transition.round) + " transition=" + short_hash_hex(transition_id) +
-               " reason=" + frontier_record_error);
-      return false;
-    }
-    certified_record.ordered_records = proposal.ordered_records;
+    consensus::CanonicalFrontierRecord certified_record{transition, proposal.ordered_records};
     consensus::FrontierExecutionResult recomputed;
     std::string validation_error;
     if (!consensus::verify_frontier_record_against_state(canonical_derivation_config_locked(), *canonical_state_,
@@ -5904,7 +5898,7 @@ bool Node::handle_frontier_block_locked(const FrontierProposal& proposal,
                " reason=certificate-committee-mismatch");
       return false;
     }
-    if (!apply_finalized_frontier_effects_locked(certified_record, canonical_sigs, true)) {
+    if (!apply_finalized_frontier_effects_locked(certified_record, canonical_sigs, true, &expected_committee)) {
       return false;
     }
     broadcast_finalized_tip();
@@ -6061,13 +6055,7 @@ bool Node::validate_frontier_proposal_locked(const FrontierProposal& proposal, s
       return false;
     }
   }
-  consensus::CanonicalFrontierRecord certified_record;
-  if (!consensus::load_certified_frontier_record_from_storage(db_, transition, &certified_record, error)) {
-    log_line("frontier-validation-ingress-missing transition=" + short_hash_hex(transition.transition_id()) +
-             " detail=" + (error ? *error : std::string("unknown")));
-    if (error && error->empty()) *error = "frontier-certified-ingress-unavailable";
-    return false;
-  }
+  consensus::CanonicalFrontierRecord certified_record{transition, proposal.ordered_records};
   consensus::FrontierExecutionResult recomputed;
   if (!consensus::verify_frontier_record_against_state(canonical_derivation_config_locked(), *canonical_state_,
                                                        certified_record, &recomputed, error)) {
