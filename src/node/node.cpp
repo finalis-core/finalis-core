@@ -564,6 +564,7 @@ std::vector<PubKey32> proposer_schedule_from_checkpoint(const NetworkConfig& net
 std::optional<PubKey32> leader_from_checkpoint(const NetworkConfig& network, const consensus::ValidatorRegistry& validators,
                                                const storage::FinalizedCommitteeCheckpoint& checkpoint,
                                                std::uint64_t height, std::uint32_t round) {
+  if (round > 0) return consensus::checkpoint_ticket_pow_fallback_member_for_round(checkpoint, round);
   const auto schedule = proposer_schedule_from_checkpoint(network, validators, checkpoint, height);
   if (schedule.empty()) return std::nullopt;
   return schedule[static_cast<std::size_t>(round) % schedule.size()];
@@ -1269,7 +1270,7 @@ bool persist_canonical_cache_rows(storage::DB& db, const consensus::CanonicalDer
 
 bool certificate_matches_checkpoint_committee(const FinalityCertificate& cert,
                                               const storage::FinalizedCommitteeCheckpoint& checkpoint) {
-  return cert.committee_members == checkpoint.ordered_members;
+  return cert.committee_members == consensus::checkpoint_committee_for_round(checkpoint, cert.round);
 }
 
 Bytes make_coinbase_script_sig(std::uint64_t height, std::uint32_t round) {
@@ -1885,6 +1886,10 @@ bool Node::init_local_validator_key() {
 }
 
 bool Node::bootstrap_template_bind_validator(const PubKey32& pub, bool local_validator) {
+  if (bootstrap_handoff_complete_locked()) {
+    log_line("bootstrap-bind-skip reason=handoff-complete height=" + std::to_string(finalized_height_));
+    return false;
+  }
   genesis::Document effective;
   effective.version = 1;
   effective.network_name = cfg_.network.name;
@@ -1949,6 +1954,11 @@ bool Node::maybe_adopt_bootstrap_validator_from_peer(int peer_id, const PubKey32
   // configured bootstrap peer that advertises bootstrap_validator in VERSION.
   const bool explicit_bootstrap_advertisement = std::string(source) == "version-bootstrap";
   if (!bootstrap_template_mode_) return false;
+  if (bootstrap_handoff_complete_locked()) {
+    log_line("bootstrap-adopt-skip peer_id=" + std::to_string(peer_id) + " source=" + source +
+             " reason=handoff-complete height=" + std::to_string(finalized_height_));
+    return false;
+  }
   if (bootstrap_validator_pubkey_.has_value()) {
     log_line("bootstrap-adopt-skip peer_id=" + std::to_string(peer_id) + " source=" + source +
              " reason=already-bound");
@@ -1987,6 +1997,7 @@ bool Node::maybe_adopt_bootstrap_validator_from_peer(int peer_id, const PubKey32
 
 void Node::maybe_self_bootstrap_template(std::uint64_t now_ms) {
   if (!bootstrap_template_mode_ || bootstrap_validator_pubkey_.has_value()) return;
+  if (bootstrap_handoff_complete_locked()) return;
   if (finalized_height_ != 0) return;
   if (!validators_.active_sorted(1).empty()) return;
   const bool has_bootstrap_sources = !cfg_.disable_p2p && (!bootstrap_peers_.empty() || !dns_seed_peers_.empty());
@@ -4046,9 +4057,10 @@ void Node::event_loop() {
       const auto leader = leader_for_height_round(h, current_round_);
       const auto highest_qc = highest_qc_for_height_locked(h);
       const auto highest_tc = highest_tc_for_height_locked(h);
+      const bool ticket_pow_fallback_round = current_round_ > 0;
       const bool round_justification_ready =
-          current_round_ == 0 || highest_qc.has_value() ||
-          (highest_tc.has_value() && highest_tc->round < current_round_);
+          ticket_pow_fallback_round || highest_qc.has_value() ||
+          (highest_tc.has_value() && highest_tc->round < current_round_) || current_round_ == 0;
       can_propose = leader.has_value() && *leader == local_key_.public_key;
       if (!repair_mode_ && !pause_proposals_.load() && can_propose && committee_ready && block_interval_elapsed && ticket_window_elapsed &&
           !committee.empty() && round_justification_ready) {
@@ -4083,10 +4095,17 @@ void Node::event_loop() {
           log_line("round-timeout-vote-skip height=" + std::to_string(h) + " round=" + std::to_string(timeout_round) +
                    " reason=not-committee-member");
         }
-        // Round advancement is TC-driven. A local timeout only emits evidence.
-        // Advancing immediately on the local timer causes peers to drift past
-        // valid TC-justified proposals and soft-reject them as stale.
-        if (timeout_evidence_progressed) round_started_ms_ = now_ms;
+        if (!timeout_committee.empty()) {
+          const auto old_round = current_round_;
+          current_round_ = timeout_round + 1;
+          round_started_ms_ = now_ms;
+          log_line("round-catchup height=" + std::to_string(h) + " old_round=" + std::to_string(old_round) +
+                   " new_round=" + std::to_string(current_round_) + " reason=ticket-pow-fallback-timeout");
+        } else if (timeout_evidence_progressed) {
+          // Round advancement remains TC-driven outside the deterministic
+          // deterministic ticket-pow fallback path.
+          if (timeout_evidence_progressed) round_started_ms_ = now_ms;
+        }
       }
     }
 
@@ -4416,8 +4435,14 @@ std::vector<PubKey32> Node::epoch_bootstrap_committee_for_height_locked(std::uin
   return bootstrap_members;
 }
 
+bool Node::bootstrap_handoff_complete_locked() const {
+  if (finalized_height_ == 0) return false;
+  return validators_.active_sorted(finalized_height_ + 1).size() >= 2;
+}
+
 bool Node::single_node_bootstrap_active_locked(std::uint64_t height) const {
   if (!bootstrap_template_mode_) return false;
+  if (bootstrap_handoff_complete_locked()) return false;
   if (cfg_.disable_p2p) return false;
   if (cfg_.outbound_target != 0) return false;
   if (!bootstrap_validator_pubkey_.has_value()) return false;
@@ -4426,7 +4451,6 @@ bool Node::single_node_bootstrap_active_locked(std::uint64_t height) const {
 }
 
 std::vector<PubKey32> Node::epoch_committee_for_next_height_locked(std::uint64_t height, std::uint32_t round) const {
-  (void)round;
   if (height == 0 || height != finalized_height_ + 1) return {};
   auto checkpoint = finalized_committee_checkpoint_for_height_locked(height);
   if (!checkpoint.has_value() || checkpoint->ordered_members.empty()) {
@@ -4434,13 +4458,14 @@ std::vector<PubKey32> Node::epoch_committee_for_next_height_locked(std::uint64_t
              " reason=missing-finalized-committee-checkpoint");
     return {};
   }
-  return checkpoint->ordered_members;
+  return consensus::checkpoint_committee_for_round(*checkpoint, round);
 }
 
 std::optional<PubKey32> Node::epoch_leader_for_next_height_locked(std::uint64_t height, std::uint32_t round) const {
   if (height == 0 || height != finalized_height_ + 1) return std::nullopt;
   auto checkpoint = finalized_committee_checkpoint_for_height_locked(height);
   if (!checkpoint.has_value() || checkpoint->ordered_members.empty()) return std::nullopt;
+  if (round > 0) return consensus::checkpoint_ticket_pow_fallback_member_for_round(*checkpoint, round);
   const auto schedule = proposer_schedule_from_checkpoint(cfg_.network, validators_, *checkpoint, height);
   if (schedule.empty()) {
     log_line("epoch-proposer-unavailable height=" + std::to_string(height) + " round=" + std::to_string(round) +
@@ -5487,11 +5512,11 @@ Node::ProposeHandlingResult Node::handle_propose_result(const p2p::ProposeMsg& m
       log_propose_hard_reject(validation_error);
       return ProposeHandlingResult::HardReject;
     }
-    if (msg.round > 0 && !msg.justify_qc.has_value() && !msg.justify_tc.has_value()) {
+    const bool ticket_pow_fallback_proposal = (msg.round > 0);
+    if (msg.round > 0 && !ticket_pow_fallback_proposal && !msg.justify_qc.has_value() && !msg.justify_tc.has_value()) {
       log_propose_hard_reject("missing-justify");
       return ProposeHandlingResult::HardReject;
     }
-
     if (msg.justify_qc.has_value()) {
       std::vector<FinalitySig> filtered_qc;
       std::string qc_error;
@@ -5535,7 +5560,9 @@ Node::ProposeHandlingResult Node::handle_propose_result(const p2p::ProposeMsg& m
     }
     if (msg.round > current_round_) {
       log_line("round-catchup height=" + std::to_string(msg.height) + " old_round=" + std::to_string(current_round_) +
-               " new_round=" + std::to_string(msg.round) + " reason=justified-propose");
+               " new_round=" + std::to_string(msg.round) +
+               " reason=" + std::string(ticket_pow_fallback_proposal ? "ticket-pow-fallback-propose"
+                                                                     : "justified-propose"));
       current_round_ = msg.round;
     }
 

@@ -31,7 +31,6 @@ WizardSmallImageFile={#SourceDir}\installer-assets\finalis-wizard-small.bmp
 
 [Tasks]
 Name: "desktopicon"; Description: "Create desktop shortcuts"; GroupDescription: "Additional icons:"
-Name: "launchstack"; Description: "Start Finalis node, lightserver, and explorer after installation"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -47,5 +46,5 @@ Name: "{autodesktop}\Start Finalis Stack"; Filename: "powershell.exe"; Parameter
 
 [Run]
 Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\app\scripts\Start-Finalis.ps1"" -ConfigureFirewall -NoStart"; Flags: runhidden
-Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\app\scripts\Start-Finalis.ps1"""; Flags: postinstall nowait skipifsilent; Tasks: launchstack
+Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\app\scripts\Start-Finalis.ps1"""; Flags: postinstall nowait skipifsilent
 Filename: "{app}\app\bin\finalis-wallet.exe"; Description: "Launch Finalis Wallet"; Flags: postinstall nowait skipifsilent; Check: FileExists(ExpandConstant('{app}\app\bin\finalis-wallet.exe'))

@@ -936,12 +936,11 @@ bool load_certified_frontier_record_from_storage(const storage::DB& db, const Fr
 std::vector<PubKey32> canonical_committee_for_height_round(const CanonicalDerivationConfig& cfg,
                                                            const CanonicalDerivedState& state, std::uint64_t height,
                                                            std::uint32_t round) {
-  (void)round;
   if (height == 0) return {};
   const auto epoch_start = committee_epoch_start(height, cfg.network.committee_epoch_blocks);
   auto it = state.finalized_committee_checkpoints.find(epoch_start);
   if (it == state.finalized_committee_checkpoints.end()) return {};
-  return it->second.ordered_members;
+  return checkpoint_committee_for_round(it->second, round);
 }
 
 std::optional<PubKey32> canonical_leader_for_height_round(const CanonicalDerivationConfig& cfg,
@@ -951,6 +950,7 @@ std::optional<PubKey32> canonical_leader_for_height_round(const CanonicalDerivat
   const auto epoch_start = committee_epoch_start(height, cfg.network.committee_epoch_blocks);
   auto it = state.finalized_committee_checkpoints.find(epoch_start);
   if (it == state.finalized_committee_checkpoints.end()) return std::nullopt;
+  if (round > 0) return checkpoint_ticket_pow_fallback_member_for_round(it->second, round);
   const auto schedule = proposer_schedule_from_checkpoint(cfg, state, it->second, height);
   if (schedule.empty()) return std::nullopt;
   return schedule[static_cast<std::size_t>(round) % schedule.size()];
@@ -1872,6 +1872,84 @@ bool validate_checkpoint_schedule_for_height(const CanonicalDerivationConfig& cf
     }
   }
   return true;
+}
+
+bool bootstrap_handoff_complete(const CanonicalDerivedState& state) {
+  if (state.finalized_height == 0) return false;
+  return state.validators.active_sorted(state.finalized_height + 1).size() >= 2;
+}
+
+std::optional<PubKey32> checkpoint_ticket_pow_fallback_member(const storage::FinalizedCommitteeCheckpoint& checkpoint) {
+  if (checkpoint.ordered_members.empty()) return std::nullopt;
+  const auto ticket_hash_at = [&](std::size_t index) -> Hash32 {
+    if (index < checkpoint.ordered_ticket_hashes.size()) return checkpoint.ordered_ticket_hashes[index];
+    Hash32 worst{};
+    worst.fill(0xff);
+    return worst;
+  };
+  const auto ticket_nonce_at = [&](std::size_t index) -> std::uint64_t {
+    if (index < checkpoint.ordered_ticket_nonces.size()) return checkpoint.ordered_ticket_nonces[index];
+    return std::numeric_limits<std::uint64_t>::max();
+  };
+
+  std::size_t best_index = 0;
+  for (std::size_t i = 1; i < checkpoint.ordered_members.size(); ++i) {
+    const auto best_hash = ticket_hash_at(best_index);
+    const auto cand_hash = ticket_hash_at(i);
+    if (cand_hash != best_hash) {
+      if (cand_hash < best_hash) best_index = i;
+      continue;
+    }
+    const auto best_nonce = ticket_nonce_at(best_index);
+    const auto cand_nonce = ticket_nonce_at(i);
+    if (cand_nonce != best_nonce) {
+      if (cand_nonce < best_nonce) best_index = i;
+      continue;
+    }
+    if (checkpoint.ordered_members[i] < checkpoint.ordered_members[best_index]) best_index = i;
+  }
+  return checkpoint.ordered_members[best_index];
+}
+
+std::optional<PubKey32> checkpoint_ticket_pow_fallback_member_for_round(const storage::FinalizedCommitteeCheckpoint& checkpoint,
+                                                                        std::uint32_t round) {
+  if (checkpoint.ordered_members.empty() || round == 0) return std::nullopt;
+
+  std::vector<std::size_t> ranked(checkpoint.ordered_members.size());
+  for (std::size_t i = 0; i < ranked.size(); ++i) ranked[i] = i;
+
+  const auto ticket_hash_at = [&](std::size_t index) -> Hash32 {
+    if (index < checkpoint.ordered_ticket_hashes.size()) return checkpoint.ordered_ticket_hashes[index];
+    Hash32 worst{};
+    worst.fill(0xff);
+    return worst;
+  };
+  const auto ticket_nonce_at = [&](std::size_t index) -> std::uint64_t {
+    if (index < checkpoint.ordered_ticket_nonces.size()) return checkpoint.ordered_ticket_nonces[index];
+    return std::numeric_limits<std::uint64_t>::max();
+  };
+
+  std::sort(ranked.begin(), ranked.end(), [&](std::size_t a, std::size_t b) {
+    const auto ah = ticket_hash_at(a);
+    const auto bh = ticket_hash_at(b);
+    if (ah != bh) return ah < bh;
+    const auto an = ticket_nonce_at(a);
+    const auto bn = ticket_nonce_at(b);
+    if (an != bn) return an < bn;
+    return checkpoint.ordered_members[a] < checkpoint.ordered_members[b];
+  });
+
+  const std::size_t selected = std::min<std::size_t>(static_cast<std::size_t>(round - 1), ranked.size() - 1);
+  return checkpoint.ordered_members[ranked[selected]];
+}
+
+std::vector<PubKey32> checkpoint_committee_for_round(const storage::FinalizedCommitteeCheckpoint& checkpoint,
+                                                     std::uint32_t round) {
+  if (round == 0) return checkpoint.ordered_members;
+  if (auto fallback = checkpoint_ticket_pow_fallback_member_for_round(checkpoint, round); fallback.has_value()) {
+    return {*fallback};
+  }
+  return {};
 }
 
 }  // namespace finalis::consensus

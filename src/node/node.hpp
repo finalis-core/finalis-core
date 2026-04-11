@@ -281,6 +281,7 @@ class Node {
   std::vector<PubKey32> epoch_bootstrap_committee_for_height_locked(std::uint64_t height) const;
   std::vector<PubKey32> epoch_committee_for_next_height_locked(std::uint64_t height, std::uint32_t round) const;
   std::optional<PubKey32> epoch_leader_for_next_height_locked(std::uint64_t height, std::uint32_t round) const;
+  bool bootstrap_handoff_complete_locked() const;
   bool single_node_bootstrap_active_locked(std::uint64_t height) const;
   bool recover_single_validator_epoch_committee_locked(std::uint64_t epoch, const char* reason);
   bool ensure_required_epoch_committee_state_locked();

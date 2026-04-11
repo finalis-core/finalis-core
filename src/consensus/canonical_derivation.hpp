@@ -178,6 +178,12 @@ bool validate_next_epoch_checkpoint_from_state(const CanonicalDerivationConfig& 
 bool validate_checkpoint_schedule_for_height(const CanonicalDerivationConfig& cfg, const CanonicalDerivedState& state,
                                              const storage::FinalizedCommitteeCheckpoint& checkpoint,
                                              std::uint64_t height, std::string* error);
+bool bootstrap_handoff_complete(const CanonicalDerivedState& state);
+std::optional<PubKey32> checkpoint_ticket_pow_fallback_member(const storage::FinalizedCommitteeCheckpoint& checkpoint);
+std::optional<PubKey32> checkpoint_ticket_pow_fallback_member_for_round(
+    const storage::FinalizedCommitteeCheckpoint& checkpoint, std::uint32_t round);
+std::vector<PubKey32> checkpoint_committee_for_round(const storage::FinalizedCommitteeCheckpoint& checkpoint,
+                                                     std::uint32_t round);
 
 std::vector<PubKey32> canonical_committee_for_height_round(const CanonicalDerivationConfig& cfg,
                                                            const CanonicalDerivedState& state, std::uint64_t height,
