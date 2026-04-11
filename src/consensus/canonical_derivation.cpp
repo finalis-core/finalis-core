@@ -1274,11 +1274,9 @@ bool verify_frontier_record_against_state(const CanonicalDerivationConfig& cfg, 
       return false;
     }
     FrontierTransition expected_transition = result.transition;
-    if (!populate_frontier_transition_metadata(cfg, prev, record.transition.height, record.transition.round,
-                                               record.transition.leader_pubkey, record.transition.observed_signers,
-                                               result.accepted_fee_units, result.next_utxos, &expected_transition, error)) {
-      return false;
-    }
+    const bool have_current_expected = populate_frontier_transition_metadata(
+        cfg, prev, record.transition.height, record.transition.round, record.transition.leader_pubkey,
+        record.transition.observed_signers, result.accepted_fee_units, result.next_utxos, &expected_transition, error);
     FrontierTransition legacy_expected_transition = result.transition;
     std::string legacy_error;
     const bool have_legacy_expected = populate_frontier_transition_metadata_legacy_for_replay(
@@ -1293,10 +1291,12 @@ bool verify_frontier_record_against_state(const CanonicalDerivationConfig& cfg, 
              record.transition.settlement.serialize() == expected.settlement.serialize() &&
              record.transition.next_state_root == expected.next_state_root;
     };
-    if (!transition_metadata_matches(expected_transition)) {
+    if (!have_current_expected || !transition_metadata_matches(expected_transition)) {
       if (!have_legacy_expected || !transition_metadata_matches(legacy_expected_transition)) {
         if (record.transition.quorum_threshold != expected_transition.quorum_threshold) {
           if (error) *error = "frontier-quorum-threshold-mismatch";
+        } else if (!have_current_expected && !legacy_error.empty()) {
+          if (error) *error = legacy_error;
         } else if (record.transition.observed_signers != expected_transition.observed_signers) {
           if (error) *error = "frontier-observed-signers-mismatch";
         } else if (record.transition.settlement_commitment != record.transition.settlement.commitment()) {
