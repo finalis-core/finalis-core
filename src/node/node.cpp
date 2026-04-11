@@ -7241,9 +7241,24 @@ bool Node::load_state() {
     auto snapshot = db_.get_epoch_committee_snapshot(epoch_start);
     if (!snapshot.has_value() || snapshot->ordered_members.empty()) continue;
     if (!finalized_checkpoint_matches_epoch_snapshot(checkpoint, *snapshot)) {
-      log_line("finalized-state-invariant-violation source=load-state-checkpoint-snapshot-mismatch epoch=" +
+      log_line("canonical-cache-rewrite source=load-state-checkpoint-snapshot-mismatch epoch=" +
                std::to_string(epoch_start));
-      return false;
+      const auto rewritten_snapshot = epoch_committee_snapshot_from_checkpoint(checkpoint);
+      if (!db_.put_epoch_committee_snapshot(rewritten_snapshot)) {
+        log_line("finalized-state-invariant-violation source=load-state-checkpoint-snapshot-rewrite-failed epoch=" +
+                 std::to_string(epoch_start));
+        std::cerr << "load_state: checkpoint snapshot rewrite failed epoch=" << epoch_start << "\n";
+        return false;
+      }
+      if (epoch_committee_closed_locked(epoch_start)) {
+        const auto marker = make_epoch_committee_freeze_marker_locked(rewritten_snapshot);
+        if (!db_.put_epoch_committee_freeze_marker(marker)) {
+          log_line("finalized-state-invariant-violation source=load-state-checkpoint-freeze-marker-rewrite-failed epoch=" +
+                   std::to_string(epoch_start));
+          std::cerr << "load_state: checkpoint freeze marker rewrite failed epoch=" << epoch_start << "\n";
+          return false;
+        }
+      }
     }
   }
   for (const auto& [key, value] : db_.scan_prefix(kConsensusSafetyStatePrefix)) {
