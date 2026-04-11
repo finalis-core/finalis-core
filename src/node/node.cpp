@@ -5863,24 +5863,13 @@ bool Node::handle_frontier_block_locked(const FrontierProposal& proposal,
   if (transition.height > finalized_height_ + 1 || transition.prev_finalized_hash != finalized_identity_.id) {
     return false;
   }
-  std::string validation_error;
-  if (!validate_frontier_proposal_locked(proposal, &validation_error)) {
-    log_line("frontier-block-reject height=" + std::to_string(transition.height) + " round=" +
-             std::to_string(transition.round) + " transition=" + short_hash_hex(transition_id) +
-             " reason=" + validation_error);
-    return false;
-  }
-  std::string lock_error;
-  if (!can_accept_frontier_with_lock_locked(transition, &lock_error)) {
-    log_line("frontier-block-reject height=" + std::to_string(transition.height) + " round=" +
-             std::to_string(transition.round) + " transition=" + short_hash_hex(transition_id) +
-             " reason=" + lock_error);
-    return false;
-  }
-  candidate_frontier_proposals_[transition_id] = proposal;
-  candidate_block_sizes_[transition_id] = proposal.serialize().size();
-
   if (certificate.has_value()) {
+    if (!canonical_state_.has_value()) {
+      log_line("frontier-block-reject height=" + std::to_string(transition.height) + " round=" +
+               std::to_string(transition.round) + " transition=" + short_hash_hex(transition_id) +
+               " reason=missing-canonical-state");
+      return false;
+    }
     std::vector<FinalitySig> canonical_sigs;
     std::string cert_error;
     if (!verify_finality_certificate_for_frontier_locked(*certificate, transition, &canonical_sigs, &cert_error)) {
@@ -5898,6 +5887,23 @@ bool Node::handle_frontier_block_locked(const FrontierProposal& proposal,
       return false;
     }
     certified_record.ordered_records = proposal.ordered_records;
+    consensus::FrontierExecutionResult recomputed;
+    std::string validation_error;
+    if (!consensus::verify_frontier_record_against_state(canonical_derivation_config_locked(), *canonical_state_,
+                                                         certified_record, &recomputed, &validation_error)) {
+      log_line("frontier-block-reject height=" + std::to_string(transition.height) + " round=" +
+               std::to_string(transition.round) + " transition=" + short_hash_hex(transition_id) +
+               " reason=" + validation_error);
+      return false;
+    }
+    const auto expected_committee = recomputed.effective_committee;
+    const std::size_t expected_quorum = consensus::quorum_threshold(expected_committee.size());
+    if (certificate->committee_members != expected_committee || certificate->quorum_threshold != expected_quorum) {
+      log_line("frontier-block-reject height=" + std::to_string(transition.height) + " round=" +
+               std::to_string(transition.round) + " transition=" + short_hash_hex(transition_id) +
+               " reason=certificate-committee-mismatch");
+      return false;
+    }
     if (!apply_finalized_frontier_effects_locked(certified_record, canonical_sigs, true)) {
       return false;
     }
@@ -5905,6 +5911,23 @@ bool Node::handle_frontier_block_locked(const FrontierProposal& proposal,
     if (from_peer_id != 0) (void)maybe_request_forward_sync_block_locked(from_peer_id);
     return true;
   }
+
+  std::string validation_error;
+  if (!validate_frontier_proposal_locked(proposal, &validation_error)) {
+    log_line("frontier-block-reject height=" + std::to_string(transition.height) + " round=" +
+             std::to_string(transition.round) + " transition=" + short_hash_hex(transition_id) +
+             " reason=" + validation_error);
+    return false;
+  }
+  std::string lock_error;
+  if (!can_accept_frontier_with_lock_locked(transition, &lock_error)) {
+    log_line("frontier-block-reject height=" + std::to_string(transition.height) + " round=" +
+             std::to_string(transition.round) + " transition=" + short_hash_hex(transition_id) +
+             " reason=" + lock_error);
+    return false;
+  }
+  candidate_frontier_proposals_[transition_id] = proposal;
+  candidate_block_sizes_[transition_id] = proposal.serialize().size();
 
   (void)finalize_if_quorum(transition_id, transition.height, transition.round);
   return true;
