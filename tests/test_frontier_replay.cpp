@@ -2003,7 +2003,7 @@ TEST(test_checkpoint_ticket_pow_fallback_member_uses_best_ticket_hash_and_nonce)
   ASSERT_EQ(*fallback, b);
 }
 
-TEST(test_round_one_ticket_pow_fallback_uses_single_best_ticket_member) {
+TEST(test_ticket_pow_fallback_begins_after_normal_proposer_rounds_are_exhausted) {
   auto cfg = live_activation_cfg();
   const auto a = key_from_byte(148).public_key;
   const auto b = key_from_byte(149).public_key;
@@ -2033,21 +2033,28 @@ TEST(test_round_one_ticket_pow_fallback_uses_single_best_ticket_member) {
   ASSERT_EQ(round0, checkpoint.ordered_members);
 
   const auto round1 = consensus::canonical_committee_for_height_round(cfg, state, 1, 1);
-  ASSERT_EQ(round1.size(), 1u);
-  ASSERT_EQ(round1.front(), c);
+  ASSERT_EQ(round1, checkpoint.ordered_members);
 
   const auto round2 = consensus::canonical_committee_for_height_round(cfg, state, 1, 2);
-  ASSERT_EQ(round2.size(), 1u);
-  ASSERT_EQ(round2.front(), b);
+  ASSERT_EQ(round2, checkpoint.ordered_members);
 
-  const auto leader0 = consensus::canonical_leader_for_height_round(cfg, state, 1, 0);
-  ASSERT_TRUE(leader0.has_value());
-  const auto leader1 = consensus::canonical_leader_for_height_round(cfg, state, 1, 1);
-  ASSERT_TRUE(leader1.has_value());
-  ASSERT_EQ(*leader1, c);
-  const auto leader2 = consensus::canonical_leader_for_height_round(cfg, state, 1, 2);
-  ASSERT_TRUE(leader2.has_value());
-  ASSERT_EQ(*leader2, b);
+  const auto round3 = consensus::canonical_committee_for_height_round(cfg, state, 1, 3);
+  ASSERT_EQ(round3.size(), 1u);
+  ASSERT_EQ(round3.front(), c);
+
+  const auto round4 = consensus::canonical_committee_for_height_round(cfg, state, 1, 4);
+  ASSERT_EQ(round4.size(), 1u);
+  ASSERT_EQ(round4.front(), b);
+
+  ASSERT_TRUE(!consensus::checkpoint_ticket_pow_fallback_member_for_round(checkpoint, 0).has_value());
+  ASSERT_TRUE(!consensus::checkpoint_ticket_pow_fallback_member_for_round(checkpoint, 1).has_value());
+  ASSERT_TRUE(!consensus::checkpoint_ticket_pow_fallback_member_for_round(checkpoint, 2).has_value());
+  const auto leader3 = consensus::checkpoint_ticket_pow_fallback_member_for_round(checkpoint, 3);
+  ASSERT_TRUE(leader3.has_value());
+  ASSERT_EQ(*leader3, c);
+  const auto leader4 = consensus::checkpoint_ticket_pow_fallback_member_for_round(checkpoint, 4);
+  ASSERT_TRUE(leader4.has_value());
+  ASSERT_EQ(*leader4, b);
 }
 
 TEST(test_live_validator_exit_mid_epoch_is_removed_only_at_next_epoch_checkpoint) {

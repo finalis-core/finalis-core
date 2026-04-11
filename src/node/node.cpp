@@ -564,7 +564,9 @@ std::vector<PubKey32> proposer_schedule_from_checkpoint(const NetworkConfig& net
 std::optional<PubKey32> leader_from_checkpoint(const NetworkConfig& network, const consensus::ValidatorRegistry& validators,
                                                const storage::FinalizedCommitteeCheckpoint& checkpoint,
                                                std::uint64_t height, std::uint32_t round) {
-  if (round > 0) return consensus::checkpoint_ticket_pow_fallback_member_for_round(checkpoint, round);
+  if (auto fallback = consensus::checkpoint_ticket_pow_fallback_member_for_round(checkpoint, round); fallback.has_value()) {
+    return fallback;
+  }
   const auto schedule = proposer_schedule_from_checkpoint(network, validators, checkpoint, height);
   if (schedule.empty()) return std::nullopt;
   return schedule[static_cast<std::size_t>(round) % schedule.size()];
@@ -4057,7 +4059,7 @@ void Node::event_loop() {
       const auto leader = leader_for_height_round(h, current_round_);
       const auto highest_qc = highest_qc_for_height_locked(h);
       const auto highest_tc = highest_tc_for_height_locked(h);
-      const bool ticket_pow_fallback_round = current_round_ > 0;
+      const bool ticket_pow_fallback_round = current_round_ > 0 && committee.size() == 1;
       const bool round_justification_ready =
           ticket_pow_fallback_round || highest_qc.has_value() ||
           (highest_tc.has_value() && highest_tc->round < current_round_) || current_round_ == 0;
@@ -4465,7 +4467,9 @@ std::optional<PubKey32> Node::epoch_leader_for_next_height_locked(std::uint64_t 
   if (height == 0 || height != finalized_height_ + 1) return std::nullopt;
   auto checkpoint = finalized_committee_checkpoint_for_height_locked(height);
   if (!checkpoint.has_value() || checkpoint->ordered_members.empty()) return std::nullopt;
-  if (round > 0) return consensus::checkpoint_ticket_pow_fallback_member_for_round(*checkpoint, round);
+  if (auto fallback = consensus::checkpoint_ticket_pow_fallback_member_for_round(*checkpoint, round); fallback.has_value()) {
+    return fallback;
+  }
   const auto schedule = proposer_schedule_from_checkpoint(cfg_.network, validators_, *checkpoint, height);
   if (schedule.empty()) {
     log_line("epoch-proposer-unavailable height=" + std::to_string(height) + " round=" + std::to_string(round) +
@@ -5512,8 +5516,7 @@ Node::ProposeHandlingResult Node::handle_propose_result(const p2p::ProposeMsg& m
       log_propose_hard_reject(validation_error);
       return ProposeHandlingResult::HardReject;
     }
-    const bool ticket_pow_fallback_proposal = (msg.round > 0);
-    if (msg.round > 0 && !ticket_pow_fallback_proposal && !msg.justify_qc.has_value() && !msg.justify_tc.has_value()) {
+    if (msg.round > 0 && !msg.justify_qc.has_value() && !msg.justify_tc.has_value()) {
       log_propose_hard_reject("missing-justify");
       return ProposeHandlingResult::HardReject;
     }
@@ -5561,8 +5564,7 @@ Node::ProposeHandlingResult Node::handle_propose_result(const p2p::ProposeMsg& m
     if (msg.round > current_round_) {
       log_line("round-catchup height=" + std::to_string(msg.height) + " old_round=" + std::to_string(current_round_) +
                " new_round=" + std::to_string(msg.round) +
-               " reason=" + std::string(ticket_pow_fallback_proposal ? "ticket-pow-fallback-propose"
-                                                                     : "justified-propose"));
+               " reason=justified-propose");
       current_round_ = msg.round;
     }
 

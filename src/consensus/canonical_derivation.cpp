@@ -950,7 +950,9 @@ std::optional<PubKey32> canonical_leader_for_height_round(const CanonicalDerivat
   const auto epoch_start = committee_epoch_start(height, cfg.network.committee_epoch_blocks);
   auto it = state.finalized_committee_checkpoints.find(epoch_start);
   if (it == state.finalized_committee_checkpoints.end()) return std::nullopt;
-  if (round > 0) return checkpoint_ticket_pow_fallback_member_for_round(it->second, round);
+  if (auto fallback = checkpoint_ticket_pow_fallback_member_for_round(it->second, round); fallback.has_value()) {
+    return fallback;
+  }
   const auto schedule = proposer_schedule_from_checkpoint(cfg, state, it->second, height);
   if (schedule.empty()) return std::nullopt;
   return schedule[static_cast<std::size_t>(round) % schedule.size()];
@@ -1913,7 +1915,9 @@ std::optional<PubKey32> checkpoint_ticket_pow_fallback_member(const storage::Fin
 
 std::optional<PubKey32> checkpoint_ticket_pow_fallback_member_for_round(const storage::FinalizedCommitteeCheckpoint& checkpoint,
                                                                         std::uint32_t round) {
-  if (checkpoint.ordered_members.empty() || round == 0) return std::nullopt;
+  if (checkpoint.ordered_members.empty()) return std::nullopt;
+  const auto committee_size = static_cast<std::uint32_t>(checkpoint.ordered_members.size());
+  if (round < committee_size) return std::nullopt;
 
   std::vector<std::size_t> ranked(checkpoint.ordered_members.size());
   for (std::size_t i = 0; i < ranked.size(); ++i) ranked[i] = i;
@@ -1939,13 +1943,14 @@ std::optional<PubKey32> checkpoint_ticket_pow_fallback_member_for_round(const st
     return checkpoint.ordered_members[a] < checkpoint.ordered_members[b];
   });
 
-  const std::size_t selected = std::min<std::size_t>(static_cast<std::size_t>(round - 1), ranked.size() - 1);
+  const std::size_t selected =
+      std::min<std::size_t>(static_cast<std::size_t>(round - committee_size), ranked.size() - 1);
   return checkpoint.ordered_members[ranked[selected]];
 }
 
 std::vector<PubKey32> checkpoint_committee_for_round(const storage::FinalizedCommitteeCheckpoint& checkpoint,
                                                      std::uint32_t round) {
-  if (round == 0) return checkpoint.ordered_members;
+  if (round < checkpoint.ordered_members.size()) return checkpoint.ordered_members;
   if (auto fallback = checkpoint_ticket_pow_fallback_member_for_round(checkpoint, round); fallback.has_value()) {
     return {*fallback};
   }
